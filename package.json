@@ -1,0 +1,22 @@
+{
+  "name": "jirabot",
+  "version": "1.0.0",
+  "description": "JiraBot for AI powered Ticket management",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nishant-gahlaut/JiraBot.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/nishant-gahlaut/JiraBot/issues"
+  },
+  "homepage": "https://github.com/nishant-gahlaut/JiraBot#readme"
+}
