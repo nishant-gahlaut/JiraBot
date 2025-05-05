@@ -9,6 +9,30 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# In-memory store for conversation states (simple approach)
+# Key: thread_ts, Value: dict containing state info (e.g., {'step': 'awaiting_summary', 'data': {...}})
+# conversation_states = {} # Removed - Moved to state_manager.py
+
+# Import state manager
+from utils.state_manager import conversation_states
+
+# Import action handlers
+from handlers.action_handler import (
+    handle_create_ticket_action,
+    handle_summarize_ticket_action,
+    handle_continue_ticket_action,
+    handle_modify_ticket_action,
+    handle_select_priority_action
+)
+# Import GenAI handler
+# from genai_handler import generate_jira_details # Moved to message_handler
+# Import Jira & Summarize handlers
+# from jira_handler import extract_ticket_id_from_input, fetch_jira_ticket_data # Moved to message_handler
+# from summarize_handler import summarize_jira_ticket # Moved to message_handler
+
+# Import the message handler
+from handlers.message_handler import handle_message
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -25,11 +49,21 @@ app = App(
 def handle_assistant_thread_started(event, client, context, logger):
     """Handles the event when a user first opens the assistant container."""
     logger.info(f"Received assistant_thread_started event: {event}")
-    channel_id = event.get("context", {}).get("channel_id")
-    team_id = event.get("context", {}).get("team_id")
-    user_id = event.get("user_id") # Assuming user_id might be available directly in the event
 
-    logger.info(f"Context - Channel: {channel_id}, Team: {team_id}, User: {user_id}")
+    # Extract information from the correct location in the event payload
+    assistant_thread_data = event.get("assistant_thread", {})
+    channel_id = assistant_thread_data.get("channel_id")
+    user_id = assistant_thread_data.get("user_id")
+    thread_ts = assistant_thread_data.get("thread_ts")
+    assistant_id = context.get("assistant_id") # Get assistant_id from context (remains the same)
+
+    # Log the extracted context (Team ID removed as it's not directly available here)
+    logger.info(f"Context - Channel: {channel_id}, User: {user_id}, Thread: {thread_ts}, Assistant: {assistant_id}")
+
+    # Check if essential info is missing
+    if not channel_id or not thread_ts:
+        logger.error(f"Could not extract channel_id ({channel_id}) or thread_ts ({thread_ts}) from event. Cannot proceed.")
+        return # Stop processing if we can't post a message
 
     # Example: Check if app has access to the channel (optional)
     # try:
@@ -38,43 +72,106 @@ def handle_assistant_thread_started(event, client, context, logger):
     # except Exception as e:
     #     logger.error(f"Error fetching channel info: {e}")
 
-    # Example: Set initial status while generating prompts
+    # Example: Set initial status while generating prompts (can be removed if not needed)
+    # try:
+    #     client.assistant_threads_setStatus(
+    #         assistant_id=assistant_id,
+    #         thread_ts=thread_ts,
+    #         status="Thinking..."
+    #     )
+    #     logger.info("Set initial status to 'Thinking...'")
+    # except Exception as e:
+    #     logger.error(f"Error setting status: {e}")
+
+
+    # Display initial CTAs using Block Kit
+    initial_blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "Hello! How can I help you with Jira today?"
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Create Ticket",
+                        "emoji": True
+                    },
+                    "action_id": "create_ticket_action", # Unique ID for this button
+                    "style": "primary" # Make this button stand out
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Summarize Ticket",
+                        "emoji": True
+                    },
+                    "action_id": "summarize_ticket_action" # Unique ID for this button
+                }
+            ]
+        }
+    ]
+
     try:
-        client.assistant_threads_setStatus(
-            assistant_id=context.get("assistant_id"), # Assuming assistant_id is in context
-            thread_ts=event.get("thread_ts"),       # Assuming thread_ts is in the event payload
-            status="Thinking..."
+        # Post the initial message with buttons in the assistant thread
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts, # Post in the specific assistant thread
+            blocks=initial_blocks,
+            text="Hello! How can I help you with Jira today?" # Fallback text
         )
-        logger.info("Set initial status to 'Thinking...'")
-    except Exception as e:
-        logger.error(f"Error setting status: {e}")
+        logger.info(f"Posted initial CTAs to thread {thread_ts}")
 
-
-    # Example: Set suggested prompts
-    try:
-        # Replace with your actual suggested prompts
-        suggested_prompts = [
-            {"prompt": "Create a new Jira issue"},
-            {"prompt": "Show my assigned issues"},
-            {"prompt": "Update issue status"}
-        ]
-        client.assistant_threads_setSuggestedPrompts(
-           assistant_id=context.get("assistant_id"), # Assuming assistant_id is in context
-           thread_ts=event.get("thread_ts"),       # Assuming thread_ts is in the event payload
-           prompts=suggested_prompts
-        )
-        logger.info(f"Set suggested prompts: {suggested_prompts}")
-
-        # Clear the status after setting prompts (if set previously)
-        client.assistant_threads_setStatus(
-            assistant_id=context.get("assistant_id"),
-            thread_ts=event.get("thread_ts"),
-            status="" # Empty string clears the status
-        )
-        logger.info("Cleared status after setting prompts.")
+        # Clear the status after posting message (if set previously)
+        # if assistant_id:
+        #     client.assistant_threads_setStatus(
+        #         assistant_id=assistant_id,
+        #         thread_ts=thread_ts,
+        #         status="" # Empty string clears the status
+        #     )
+        #     logger.info("Cleared status after posting initial message.")
 
     except Exception as e:
-        logger.error(f"Error setting suggested prompts or clearing status: {e}")
+        logger.error(f"Error posting initial message with buttons: {e}")
+
+
+# Register Action Listeners for the buttons
+@app.action("create_ticket_action")
+def trigger_create_ticket(ack, body, client):
+    handle_create_ticket_action(ack, body, client, logger)
+
+@app.action("summarize_ticket_action")
+def trigger_summarize_ticket(ack, body, client):
+    handle_summarize_ticket_action(ack, body, client, logger)
+
+# Action listeners for the confirmation buttons
+@app.action("continue_ticket_creation")
+def trigger_continue_ticket(ack, body, client):
+    handle_continue_ticket_action(ack, body, client, logger)
+
+@app.action("modify_ticket_details")
+def trigger_modify_ticket(ack, body, client):
+    handle_modify_ticket_action(ack, body, client, logger)
+
+# Action listeners for priority selection buttons
+@app.action("select_priority_p0")
+def trigger_priority_p0(ack, body, client):
+    handle_select_priority_action(ack, body, client, logger, priority_level="P0")
+
+@app.action("select_priority_p1")
+def trigger_priority_p1(ack, body, client):
+    handle_select_priority_action(ack, body, client, logger, priority_level="P1")
+
+@app.action("select_priority_p2")
+def trigger_priority_p2(ack, body, client):
+    handle_select_priority_action(ack, body, client, logger, priority_level="P2")
 
 
 # Listen for context changes (Optional)
@@ -88,57 +185,9 @@ def handle_context_changed(event, logger):
 # 3 & 4: Listen and respond to message.im
 @app.event("message") # Catches Direct Messages (IMs) and potentially others
 def handle_message_events(message, client, context, logger):
-    """Handles messages sent directly to the bot."""
-    # Check if it's a direct message (IM) and not from the bot itself
-    if message.get("channel_type") == "im" and "bot_id" not in message:
-        logger.info(f"Received message.im event: {message}")
-        channel_id = message["channel"]
-        user_id = message["user"]
-        text = message.get("text", "")
-        thread_ts = message.get("thread_ts") # Important for threading in assistant container
-        assistant_id = context.get("assistant_id") # Get assistant_id from context
-
-        # Set status immediately only if in an assistant thread
-        if thread_ts and assistant_id:
-             try:
-                 client.assistant_threads_setStatus(
-                     assistant_id=assistant_id,
-                     thread_ts=thread_ts,
-                     status="Responding..." # Simple status
-                 )
-                 logger.info("Set responding status.")
-             except Exception as e:
-                 # Log the error but continue, maybe assistant_id/thread_ts wasn't as expected
-                 logger.error(f"Error setting status on message: {e}")
-
-
-        # --- Simple Response Logic ---
-        response_text = "hello"
-        # --- End Simple Response Logic ---
-
-
-        # Post the response back to the same thread if thread_ts exists
-        if thread_ts:
-            try:
-                client.chat_postMessage(
-                    channel=channel_id,
-                    thread_ts=thread_ts, # Respond in the assistant thread
-                    text=response_text
-                )
-                logger.info(f"Sent '{response_text}' response to thread {thread_ts}")
-                # Status is automatically cleared by sending a message.
-            except Exception as e:
-                logger.error(f"Error posting message to thread: {e}")
-        else:
-            # Handle messages outside the assistant thread if necessary
-            try:
-                client.chat_postMessage(
-                    channel=channel_id,
-                    text=f"Hi there! Please interact with me using the Assistant container."
-                )
-                logger.info(f"Sent non-threaded response to channel {channel_id}")
-            except Exception as e:
-                logger.error(f"Error posting non-threaded message: {e}")
+    """Handles messages sent directly to the bot by routing to message_handler."""
+    # Route the event to the dedicated handler function
+    handle_message(message, client, context, logger)
 
 
 # --- Start the App ---
