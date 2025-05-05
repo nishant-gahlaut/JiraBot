@@ -20,9 +20,9 @@ from utils.state_manager import conversation_states
 from handlers.action_handler import (
     handle_create_ticket_action,
     handle_summarize_ticket_action,
-    handle_continue_ticket_action,
-    handle_modify_ticket_action,
-    handle_select_priority_action
+    handle_create_ticket_submission,
+    handle_continue_after_ai,
+    handle_modify_after_ai
 )
 # Import GenAI handler
 # from genai_handler import generate_jira_details # Moved to message_handler
@@ -151,27 +151,19 @@ def trigger_create_ticket(ack, body, client):
 def trigger_summarize_ticket(ack, body, client):
     handle_summarize_ticket_action(ack, body, client, logger)
 
-# Action listeners for the confirmation buttons
-@app.action("continue_ticket_creation")
-def trigger_continue_ticket(ack, body, client):
-    handle_continue_ticket_action(ack, body, client, logger)
+# Action listeners for AI confirmation buttons
+@app.action("continue_after_ai")
+def trigger_continue_after_ai(ack, body, client):
+    handle_continue_after_ai(ack, body, client, logger)
 
-@app.action("modify_ticket_details")
-def trigger_modify_ticket(ack, body, client):
-    handle_modify_ticket_action(ack, body, client, logger)
+@app.action("modify_after_ai")
+def trigger_modify_after_ai(ack, body, client):
+    handle_modify_after_ai(ack, body, client, logger)
 
-# Action listeners for priority selection buttons
-@app.action("select_priority_p0")
-def trigger_priority_p0(ack, body, client):
-    handle_select_priority_action(ack, body, client, logger, priority_level="P0")
-
-@app.action("select_priority_p1")
-def trigger_priority_p1(ack, body, client):
-    handle_select_priority_action(ack, body, client, logger, priority_level="P1")
-
-@app.action("select_priority_p2")
-def trigger_priority_p2(ack, body, client):
-    handle_select_priority_action(ack, body, client, logger, priority_level="P2")
+# Listener for modal submission
+@app.view("create_ticket_modal_submission")
+def handle_view_submission(ack, body, client, logger):
+    handle_create_ticket_submission(ack, body, client, logger)
 
 
 # Listen for context changes (Optional)

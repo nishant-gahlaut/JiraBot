@@ -32,49 +32,51 @@ def handle_message(message, client, context, logger):
             logger.info(f"Checking state for thread {thread_ts}: {current_state}")
 
             # --- Handle Summary Input (From Create Ticket Flow) ---
-            if current_state and current_state["step"] == "awaiting_summary":
-                logger.info(f"Thread {thread_ts} is in 'awaiting_summary' state. Processing summary: '{text}'")
+            # REMOVED - Now handled by modal
+            # if current_state and current_state["step"] == "awaiting_summary":
+                # ... (removed logic) ...
 
-                # Set status while processing
+            # --- Handle Initial Summary/Description Input (NEW Create Ticket Flow Start) ---
+            if current_state and current_state["step"] == "awaiting_initial_summary":
+                user_text = text
+                logger.info(f"Thread {thread_ts} is in 'awaiting_initial_summary' state. Processing text: '{user_text}'")
+
+                # Set status while processing with GenAI
                 if assistant_id:
                     try:
-                        client.assistant_threads_setStatus(
-                            assistant_id=assistant_id,
-                            thread_ts=thread_ts,
-                            status="Generating ticket details..." 
-                        )
-                        logger.info("Set status to 'Generating ticket details...'")
+                        client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="Generating suggestion...")
+                        logger.info("Set status to 'Generating suggestion...'")
                     except Exception as e:
-                        logger.error(f"Error setting status before GenAI: {e}")
+                        logger.error(f"Error setting status before GenAI for initial summary: {e}")
 
-                # Call GenAI
-                user_summary = text
-                generated_details = generate_jira_details(user_summary)
-                generated_title = generated_details.get("title", "Error: Title not generated")
-                generated_description = generated_details.get("description", "Error: Description not generated")
-                
+                # Call GenAI to get *suggested title* based on user description
+                # Treat user text as the initial description
+                # We assume generate_jira_details returns at least a 'title'
+                generated_details = generate_jira_details(user_text) # Use the full text
+                suggested_title = generated_details.get("title", "Suggestion Error") 
+                initial_description = user_text # User's input is the description
+
                 # Store data and update state
-                current_state["data"]["raw_summary"] = user_summary
-                current_state["data"]["generated_title"] = generated_title
-                current_state["data"]["generated_description"] = generated_description
-                current_state["step"] = "awaiting_confirmation"
-                conversation_states[thread_ts] = current_state 
-                logger.info(f"Updated state for thread {thread_ts} to 'awaiting_confirmation' with data: {current_state['data']}")
+                current_state["data"]["initial_description"] = initial_description
+                current_state["data"]["suggested_title"] = suggested_title
+                current_state["step"] = "awaiting_ai_confirmation"
+                conversation_states[thread_ts] = current_state
+                logger.info(f"Updated state for thread {thread_ts} to 'awaiting_ai_confirmation' with data: {{'suggested_title': '{suggested_title}', 'initial_description': Truncated}}")
 
-                # Prepare confirmation response
-                confirmation_blocks = [
+                # Prepare confirmation response with buttons
+                ai_confirmation_blocks = [
                     {
                         "type": "section",
                         "text": {
                             "type": "mrkdwn",
-                            "text": f"Okay, I've drafted a Jira ticket based on your summary:\n\n*Title:* {generated_title}\n\n*Description:*```{generated_description}```"
+                            "text": f"Thanks! Based on your description, I suggest the following:\n\n*Suggested Title:* {suggested_title}\n\n*Your Description:*```{initial_description}```\n\nWould you like to proceed with these details or modify them?"
                         }
                     },
                     {
                         "type": "actions",
                         "elements": [
-                            {"type": "button", "text": {"type": "plain_text", "text": "Continue", "emoji": True}, "style": "primary", "action_id": "continue_ticket_creation"},
-                            {"type": "button", "text": {"type": "plain_text", "text": "Modify", "emoji": True}, "action_id": "modify_ticket_details"}
+                            {"type": "button", "text": {"type": "plain_text", "text": "Continue", "emoji": True}, "style": "primary", "action_id": "continue_after_ai"},
+                            {"type": "button", "text": {"type": "plain_text", "text": "Modify", "emoji": True}, "action_id": "modify_after_ai"}
                         ]
                     }
                 ]
@@ -83,47 +85,25 @@ def handle_message(message, client, context, logger):
                     client.chat_postMessage(
                         channel=channel_id,
                         thread_ts=thread_ts,
-                        blocks=confirmation_blocks,
-                        text=f"Drafted Jira Ticket: {generated_title}" 
+                        blocks=ai_confirmation_blocks,
+                        text=f"Suggested Title: {suggested_title}" # Fallback
                     )
-                    logger.info(f"Posted confirmation and buttons to thread {thread_ts}")
+                    logger.info(f"Posted AI suggestion confirmation to thread {thread_ts}")
+                    # Status is cleared by message post
                 except Exception as e:
-                    logger.error(f"Error posting confirmation message: {e}")
+                    logger.error(f"Error posting AI confirmation message: {e}")
+                    # Clear status on error
                     if assistant_id:
-                         try:
-                             client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
-                         except Exception as se:
-                             logger.error(f"Error clearing status after post failure: {se}")
+                        try: client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
+                        except Exception as se: logger.error(f"Error clearing status after AI confirmation post failure: {se}")
 
             # --- Handle Assignee Input (From Create Ticket Flow) ---
-            elif current_state and current_state["step"] == "awaiting_assignee":
-                 assignee_name = text.strip()
-                 logger.info(f"Thread {thread_ts} is in 'awaiting_assignee' state. Processing assignee: '{assignee_name}'")
-                 # TODO: Validate assignee name
-                 current_state["data"]["assignee"] = assignee_name
-                 current_state["step"] = "ready_to_create" 
-                 conversation_states[thread_ts] = current_state
-                 logger.info(f"Updated state for thread {thread_ts} to '{current_state['step']}'. Data: {current_state['data']}")
-
-                 # Send Confirmation
-                 final_confirmation_text = (
-                     f"Okay, I have all the details to create the ticket:\n"
-                     f"- *Title*: {current_state['data'].get('generated_title')}\n"
-                     f"- *Description*: ```{current_state['data'].get('generated_description')}```\n"
-                     f"- *Priority*: {current_state['data'].get('priority')}\n"
-                     f"- *Assignee*: {current_state['data'].get('assignee')}\n\n"
-                     f"(Next step: Call Jira API to create - Not implemented yet)"
-                 )
-                 try:
-                     client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=final_confirmation_text)
-                     logger.info(f"Posted final confirmation for thread {thread_ts}")
-                     # TODO: Consider clearing state here or after actual creation
-                     # del conversation_states[thread_ts]
-                 except Exception as e:
-                     logger.error(f"Error posting final confirmation message: {e}")
+            # REMOVED - Now handled by modal
+            # elif current_state and current_state["step"] == "awaiting_assignee":
+                # ... (removed logic) ...
 
             # --- Handle Ticket ID/URL Input (From Summarize Ticket Flow) ---
-            elif current_state and current_state["step"] == "awaiting_summary_input":
+            if current_state and current_state["step"] == "awaiting_summary_input": # Changed from elif to if
                 user_input = text
                 logger.info(f"Thread {thread_ts} is in 'awaiting_summary_input' state. Processing input: '{user_input}'")
                 # Set status
