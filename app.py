@@ -24,6 +24,11 @@ from handlers.action_handler import (
     handle_continue_after_ai,
     handle_modify_after_ai
 )
+from handlers.my_tickets_handler import (
+    handle_my_tickets_initial_action,
+    handle_my_tickets_period_selection,
+    handle_my_tickets_status_selection
+)
 # Import GenAI handler
 # from genai_handler import generate_jira_details # Moved to message_handler
 # Import Jira & Summarize handlers
@@ -103,8 +108,8 @@ def handle_assistant_thread_started(event, client, context, logger):
                         "text": "Create Ticket",
                         "emoji": True
                     },
-                    "action_id": "create_ticket_action", # Unique ID for this button
-                    "style": "primary" # Make this button stand out
+                    "action_id": "create_ticket_action",
+                    "style": "primary"
                 },
                 {
                     "type": "button",
@@ -113,7 +118,16 @@ def handle_assistant_thread_started(event, client, context, logger):
                         "text": "Summarize Ticket",
                         "emoji": True
                     },
-                    "action_id": "summarize_ticket_action" # Unique ID for this button
+                    "action_id": "summarize_ticket_action"
+                },
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "My Tickets",
+                        "emoji": True
+                    },
+                    "action_id": "my_tickets_action" # New action ID
                 }
             ]
         }
@@ -159,6 +173,43 @@ def trigger_continue_after_ai(ack, body, client):
 @app.action("modify_after_ai")
 def trigger_modify_after_ai(ack, body, client):
     handle_modify_after_ai(ack, body, client, logger)
+
+# --- My Tickets Flow Action Listeners ---
+@app.action("my_tickets_action")
+def trigger_my_tickets_initial(ack, body, client):
+    handle_my_tickets_initial_action(ack, body, client, logger)
+
+@app.action("my_tickets_period_1w")
+def trigger_my_tickets_period_1w(ack, body, client):
+    handle_my_tickets_period_selection(ack, body, client, logger, period_value="1w")
+
+@app.action("my_tickets_period_2w")
+def trigger_my_tickets_period_2w(ack, body, client):
+    handle_my_tickets_period_selection(ack, body, client, logger, period_value="2w")
+
+@app.action("my_tickets_period_1m")
+def trigger_my_tickets_period_1m(ack, body, client):
+    handle_my_tickets_period_selection(ack, body, client, logger, period_value="1m") # Will be converted to -4w in JQL
+
+@app.action("my_tickets_status_open")
+def trigger_my_tickets_status_open(ack, body, client):
+    handle_my_tickets_status_selection(ack, body, client, logger, status_value="Open")
+
+@app.action("my_tickets_status_indetailing")
+def trigger_my_tickets_status_indetailing(ack, body, client):
+    handle_my_tickets_status_selection(ack, body, client, logger, status_value="In Detailing") # Adjust status names if different in your Jira
+
+@app.action("my_tickets_status_indev")
+def trigger_my_tickets_status_indev(ack, body, client):
+    handle_my_tickets_status_selection(ack, body, client, logger, status_value="In Dev")
+
+@app.action("my_tickets_status_qa")
+def trigger_my_tickets_status_qa(ack, body, client):
+    handle_my_tickets_status_selection(ack, body, client, logger, status_value="QA") # Or "In QA"
+
+@app.action("my_tickets_status_closed")
+def trigger_my_tickets_status_closed(ack, body, client):
+    handle_my_tickets_status_selection(ack, body, client, logger, status_value="Closed")
 
 # Listener for modal submission
 @app.view("create_ticket_modal_submission")
