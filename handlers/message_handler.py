@@ -11,6 +11,7 @@ from utils.state_manager import conversation_states
 from services.genai_service import generate_jira_details
 from services.jira_service import extract_ticket_id_from_input, fetch_jira_ticket_data
 from services.summarize_service import summarize_jira_ticket
+from utils.data_cleaner import clean_jira_data
 from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
@@ -135,25 +136,44 @@ def handle_message(message, client, context, logger):
                         except Exception as e:
                             logger.error(f"Error posting data fetch failure message: {e}")
                     else:
-                        summary_result = summarize_jira_ticket(jira_data)
-                        if not summary_result:
+                        # Clean the fetched data
+                        cleaned_data = clean_jira_data(jira_data)
+                        
+                        if not cleaned_data:
+                            # Handle cleaning error
+                            logger.error(f"Failed to clean Jira data for {ticket_id} in thread {thread_ts}")
                             try:
-                                client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"Sorry, there was an error generating the summary for ticket '{ticket_id}'.")
-                                logger.error(f"Failed to summarize Jira data for {ticket_id} in thread {thread_ts}")
+                                client.chat_postMessage(
+                                    channel=channel_id,
+                                    thread_ts=thread_ts,
+                                    text=f"Sorry, there was an error processing the data for ticket '{ticket_id}'."
+                                )
                             except Exception as e:
-                                logger.error(f"Error posting summarization failure message: {e}")
+                                logger.error(f"Error posting data cleaning failure message: {e}")
                         else:
-                            summary_text = (
-                                f"Here is a summary for ticket *{ticket_id}*:\n\n"
-                                f"*Status*: {summary_result.get('status', 'N/A')}\n"
-                                f"*Issue*: {summary_result.get('issue_summary', 'N/A')}\n"
-                                f"*Resolution/Next Steps*: {summary_result.get('resolution_summary', 'N/A')}"
-                            )
-                            try:
-                                client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=summary_text)
-                                logger.info(f"Posted summary for {ticket_id} to thread {thread_ts}")
-                            except Exception as e:
-                                logger.error(f"Error posting summary message: {e}")
+                            # Summarize Cleaned Data (Placeholder)
+                            # Pass cleaned_data instead of jira_data
+                            summary_result = summarize_jira_ticket(cleaned_data)
+    
+                            if not summary_result:
+                                # Handle summarization error
+                                try:
+                                    client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"Sorry, there was an error generating the summary for ticket '{ticket_id}'.")
+                                    logger.error(f"Failed to summarize Jira data for {ticket_id} in thread {thread_ts}")
+                                except Exception as e:
+                                    logger.error(f"Error posting summarization failure message: {e}")
+                            else:
+                                summary_text = (
+                                    f"Here is a summary for ticket *{ticket_id}*:\n\n"
+                                    f"*Status*: {summary_result.get('status', 'N/A')}\n"
+                                    f"*Issue*: {summary_result.get('issue_summary', 'N/A')}\n"
+                                    f"*Resolution/Next Steps*: {summary_result.get('resolution_summary', 'N/A')}"
+                                )
+                                try:
+                                    client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=summary_text)
+                                    logger.info(f"Posted summary for {ticket_id} to thread {thread_ts}")
+                                except Exception as e:
+                                    logger.error(f"Error posting summary message: {e}")
 
                     # Clear state and status for summarization flow
                     if thread_ts in conversation_states:

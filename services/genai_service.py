@@ -1,20 +1,56 @@
 # genai_handler.py
 import os
 import logging
-# TODO: Add import for google.generativeai when implementing
+import google.generativeai as genai # Import Google GenAI
 
 logger = logging.getLogger(__name__)
 
-# TODO: Configure the GenAI client using API key from environment variables
-# genai.configure(api_key=os.environ["GOOGLE_GENAI_KEY"])
-# model = genai.GenerativeModel('gemini-pro') # Or your preferred model
+# Configure the GenAI client using API key from environment variables
+genai_model = None
+try:
+    GOOGLE_GENAI_KEY = os.environ.get("GOOGLE_GENAI_KEY")
+    if GOOGLE_GENAI_KEY:
+        genai.configure(api_key=GOOGLE_GENAI_KEY)
+        genai_model = genai.GenerativeModel('gemini-2.0-flash') # Set to user-specified model
+        logger.info("Google Generative AI client configured successfully.")
+    else:
+        logger.warning("GOOGLE_GENAI_KEY environment variable not set. GenAI features will be disabled.")
+except ImportError:
+    logger.warning("'google-generativeai' library not found. Please install it: pip install google-generativeai. GenAI features will be disabled.")
+except Exception as e:
+    logger.error(f"Failed to configure Google Generative AI: {e}. GenAI features will be disabled.")
+
+def generate_text(prompt):
+    """Generates text using the configured Google GenAI model."""
+    if not genai_model:
+        logger.error("GenAI model not initialized. Cannot generate text.")
+        return "Error: GenAI model not available."
+    
+    logger.debug(f"Sending prompt to GenAI model (first 200 chars): {prompt[:200]}...")
+    try:
+        response = genai_model.generate_content(prompt)
+        # Consider adding more robust response handling (e.g., checking finish reason, safety ratings)
+        if response.parts:
+             generated_text = "".join(part.text for part in response.parts) # Handle multi-part responses
+             logger.debug(f"Received GenAI response: {generated_text[:200]}...")
+             return generated_text.strip()
+        elif response.prompt_feedback:
+             logger.warning(f"GenAI call blocked or failed. Feedback: {response.prompt_feedback}")
+             return f"Error: Generation failed due to prompt feedback ({response.prompt_feedback.block_reason})."
+        else:
+             logger.warning("GenAI response received but contained no usable parts.")
+             return "Error: Received an empty response from AI."
+             
+    except Exception as e:
+        logger.error(f"Error calling Google GenAI API: {e}", exc_info=True)
+        return f"Error: Could not generate AI response due to an API error."
 
 def generate_jira_details(user_summary):
     """Generates a suggested Jira title and description based on user input."""
     logger.info(f"Generating Jira details for summary: '{user_summary}'")
 
-    # --- Placeholder Logic --- 
-    # Replace this with the actual Google GenAI API call
+    # --- Placeholder Logic (Retained as per request) --- 
+    # Replace this with the actual Google GenAI API call *using generate_text* if needed in future
     try:
         # Simulate API call
         if not user_summary or user_summary.isspace():

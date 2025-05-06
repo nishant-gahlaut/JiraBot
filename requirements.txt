@@ -1,2 +1,4 @@
 slack_bolt
-python-dotenv 
+python-dotenv
+google-generativeai
+jira 
