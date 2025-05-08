@@ -38,6 +38,9 @@ from handlers.my_tickets_handler import (
 # Import the message handler
 from handlers.message_handler import handle_message
 
+# Import Jira scraper functions
+from utils.jira_scraper import scrape_and_store_tickets
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -236,6 +239,15 @@ def handle_message_events(message, client, context, logger):
 # --- Start the App ---
 if __name__ == "__main__":
     try:
+        # Scrape Jira tickets from the specified project
+        project_key_to_scrape = os.environ.get("JIRA_PROJECT_KEY_TO_SCRAPE")
+        if project_key_to_scrape:
+            logger.info(f"Starting Jira scrape for project: {project_key_to_scrape}...")
+            scraped_count, total_available = scrape_and_store_tickets(project_key_to_scrape)
+            logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
+        else:
+            logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping on startup.")
+
         # Use SocketModeHandler for development/testing without exposing a public URL
         # Requires SLACK_APP_TOKEN (App-Level Token with connections:write scope)
         handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])

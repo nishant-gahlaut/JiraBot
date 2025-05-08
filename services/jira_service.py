@@ -2,6 +2,7 @@
 import logging
 import re
 import os # For environment variables
+import json # Added for pretty-printing Jira raw data
 from jira import JIRA # Import the JIRA library
 from jira.exceptions import JIRAError # Import JIRAError for exception handling
 
@@ -56,7 +57,23 @@ def _fetch_raw_ticket_from_jira(ticket_id):
     try:
         issue = jira_client.issue(ticket_id)
         logger.info(f"Successfully fetched raw data for {ticket_id} from Jira.")
-        # Log the raw issue data for debugging field names
+
+        # --- BEGIN: REMOVED INFO level logging for all raw fields ---
+        # try:
+        #     if issue and hasattr(issue, 'raw') and issue.raw:
+        #         logger.info(f"--- All Raw Fields for Jira Ticket {ticket_id} (INFO) ---")
+        #         # Pretty print the JSON for better readability in logs
+        #         formatted_raw_data = json.dumps(issue.raw, indent=2, sort_keys=True)
+        #         for line in formatted_raw_data.splitlines():
+        #             logger.info(line)
+        #         logger.info(f"--- End of Raw Fields for Jira Ticket {ticket_id} ---")
+        #     else:
+        #         logger.info(f"No raw data found or issue object is None for {ticket_id} when attempting detailed logging.")
+        # except Exception as log_detail_err:
+        #     logger.error(f"Error during detailed logging of issue.raw for {ticket_id}: {log_detail_err}")
+        # --- END: REMOVED INFO level logging for all raw fields ---
+
+        # Log the raw issue data for debugging field names (Keeping DEBUG level log)
         try:
             logger.debug(f"Raw Jira issue data for {ticket_id}: {issue.raw}")
         except Exception as log_e:
@@ -73,90 +90,20 @@ def _fetch_raw_ticket_from_jira(ticket_id):
         return None
 
 def fetch_jira_ticket_data(ticket_id):
-    """Fetches and structures Jira ticket data."""
-    logger.info(f"Fetching structured Jira data for ticket ID: {ticket_id}")
+    """Fetches the raw Jira issue object for a given ticket ID."""
+    logger.info(f"Fetching raw Jira issue object for ticket ID: {ticket_id}")
     
-    raw_issue = _fetch_raw_ticket_from_jira(ticket_id)
+    # Directly return the result of _fetch_raw_ticket_from_jira
+    # The raw issue object contains issue.raw (for all fields) and issue.fields (for common attributes)
+    # The new clean_jira_data function in data_cleaner.py will process issue.raw
+    raw_issue_object = _fetch_raw_ticket_from_jira(ticket_id)
     
-    if not raw_issue:
-        return None # Error already logged by _fetch_raw_ticket_from_jira
-
-    try:
-        # Map raw_issue fields to our desired dictionary structure
-        comments_data = []
-        if hasattr(raw_issue.fields, 'comment') and raw_issue.fields.comment and raw_issue.fields.comment.comments:
-            for comment in raw_issue.fields.comment.comments:
-                comments_data.append({
-                    "author": comment.author.displayName if hasattr(comment.author, 'displayName') else "Unknown Author",
-                    "body": comment.body,
-                    "created": comment.created
-                })
-
-        assignee_name = None
-        if hasattr(raw_issue.fields, 'assignee') and raw_issue.fields.assignee:
-            assignee_name = raw_issue.fields.assignee.displayName if hasattr(raw_issue.fields.assignee, 'displayName') else raw_issue.fields.assignee.name
-
-        reporter_name = None
-        if hasattr(raw_issue.fields, 'reporter') and raw_issue.fields.reporter:
-            reporter_name = raw_issue.fields.reporter.displayName if hasattr(raw_issue.fields.reporter, 'displayName') else raw_issue.fields.reporter.name
-
-        priority_name = None
-        if hasattr(raw_issue.fields, 'priority') and raw_issue.fields.priority:
-            priority_name = raw_issue.fields.priority.name
-
-        status_name = None
-        if hasattr(raw_issue.fields, 'status') and raw_issue.fields.status:
-            status_name = raw_issue.fields.status.name
-            
-        description_text = raw_issue.fields.description if hasattr(raw_issue.fields, 'description') else ""
-
-        structured_data = {
-            "id": raw_issue.key,
-            "summary": raw_issue.fields.summary if hasattr(raw_issue.fields, 'summary') else "",
-            "description": description_text,
-            "status": status_name,
-            "assignee": assignee_name,
-            "reporter": reporter_name,
-            "priority": priority_name,
-            "labels": raw_issue.fields.labels if hasattr(raw_issue.fields, 'labels') else [],
-            # "components": [comp.name for comp in raw_issue.fields.components if hasattr(raw_issue.fields, 'components') and raw_issue.fields.components],
-            "created": raw_issue.fields.created if hasattr(raw_issue.fields, 'created') else None,
-            "updated": raw_issue.fields.updated if hasattr(raw_issue.fields, 'updated') else None,
-            "comments": comments_data
-            # Add other fields as needed based on your Jira setup and the library's issue object structure
-        }
-        logger.info(f"Successfully structured data for {ticket_id}")
-        
-        # --- Log specific structured fields for verification ---
-        log_summary = structured_data.get('summary', '[Not Found]')
-        log_description = structured_data.get('description', '[Not Found]')
-        log_priority = structured_data.get('priority', '[Not Found]')
-        log_comments = structured_data.get('comments', [])
-        
-        comments_log_str = "\n".join([f"  - Author: {c.get('author', '?')}, Created: {c.get('created', '?')}, Body: {c.get('body', '')[:80]}..." for c in log_comments])
-        if not log_comments:
-            comments_log_str = "  [No Comments Found]"
-            
-        logger.info(
-            f"--- Structured Data Verification for {ticket_id} ---\n"
-            f"Summary: {log_summary}\n"
-            f"Priority: {log_priority}\n"
-            f"Description (start): {log_description[:150] if log_description else '[None]'}...\n"
-            f"Comments ({len(log_comments)}):\n{comments_log_str}\n"
-            f"--------------------------------------------------"
-        )
-        # --- End log specific fields ---
-            
-        return structured_data
-        
-    except AttributeError as e:
-        logger.error(f"AttributeError while structuring Jira data for {ticket_id}: {e}. Raw issue might be missing expected fields.")
+    if not raw_issue_object:
+        logger.warning(f"_fetch_raw_ticket_from_jira returned None for {ticket_id}.")
         return None
-    except Exception as e:
-        logger.error(f"Unexpected error structuring Jira data for {ticket_id}: {e}")
-        return None
-
-    # --- Placeholder logic removed --- 
+    
+    logger.info(f"Successfully fetched raw issue object for {ticket_id}. Downstream will process .raw attribute.")
+    return raw_issue_object
 
 def fetch_my_jira_tickets(assignee_id, period, status):
     """Fetches a list of ticket IDs assigned to a user based on period and status."""

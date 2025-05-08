@@ -1,6 +1,7 @@
 # utils/data_cleaner.py
 import logging
 import re
+import json # Ensure json is imported for pretty printing
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -37,45 +38,94 @@ def _parse_comment_body(body):
         
     return cleaned_body, mentions
 
-def clean_jira_data(structured_data):
-    """Cleans and restructures fetched Jira data for summarization."""
-    if not structured_data:
-        logger.warning("No structured data provided to clean.")
+def _get_custom_field_value(raw_fields, field_id, default=None):
+    """Helper to get custom field value, handling common structures."""
+    field_data = raw_fields.get(field_id)
+    if field_data:
+        if isinstance(field_data, dict):
+            # Common for select lists, user pickers, etc.
+            return field_data.get('value', field_data.get('name', default))
+        elif isinstance(field_data, list) and field_data:
+            # Common for multi-select lists
+            return [item.get('value', item.get('name', str(item))) for item in field_data if isinstance(item, dict)]
+        # Simple text or number field
+        return field_data
+    return default
+
+def clean_jira_data(raw_issue_data, ticket_id):
+    """
+    Cleans and restructures raw Jira issue data.
+    raw_issue_data is expected to be the 'raw' attribute of a Jira issue object (a dictionary).
+    """
+    if not raw_issue_data or not isinstance(raw_issue_data, dict):
+        logger.warning(f"No raw issue data provided or not a dictionary for ticket {ticket_id}. Cannot clean.")
         return None
 
-    logger.info(f"Cleaning data for ticket: {structured_data.get('id')}")
-    cleaned_metadata = {}
+    logger.info(f"Generically cleaning raw data for ticket: {ticket_id}")
+    
+    cleaned_data = {'ticket_id': ticket_id}
+    fields = raw_issue_data.get('fields', {})
 
     try:
-        # --- Basic Fields ---
-        cleaned_metadata['ticket_id'] = structured_data.get('id')
-        cleaned_metadata['summary'] = structured_data.get('summary', '').strip()
-        cleaned_metadata['description'] = (structured_data.get('description') or '').strip()
-        cleaned_metadata['status'] = structured_data.get('status', 'Unknown')
-        cleaned_metadata['priority'] = structured_data.get('priority', 'Unknown')
-        cleaned_metadata['reporter'] = structured_data.get('reporter', 'Unknown')
-        cleaned_metadata['assignee'] = structured_data.get('assignee') # Can be None
-        cleaned_metadata['created_at'] = structured_data.get('created')
-        cleaned_metadata['updated_at'] = structured_data.get('updated')
+        # --- Standard/Common Fields ---
+        cleaned_data['summary'] = fields.get('summary', '').strip()
+        cleaned_data['description'] = (fields.get('description') or '').strip()
+        cleaned_data['status'] = fields.get('status', {}).get('name', 'Unknown')
+        cleaned_data['priority'] = fields.get('priority', {}).get('name', 'Unknown')
+        cleaned_data['reporter'] = fields.get('reporter', {}).get('displayName', 'Unknown')
+        assignee_field = fields.get('assignee')
+        cleaned_data['assignee'] = assignee_field.get('displayName') if assignee_field else None
+        cleaned_data['created_at'] = fields.get('created')
+        cleaned_data['updated_at'] = fields.get('updated')
+        cleaned_data['labels'] = fields.get('labels', [])
+        cleaned_data['components'] = [comp.get('name') for comp in fields.get('components', []) if comp.get('name')]
+
+        # --- Custom Fields (Identified from logs or placeholders) ---
+        # You'll need to find the correct customfield_XXXXX from your Jira's raw issue output
+        
+        # Identified from CAP-142897 log:
+        cleaned_data['owned_by_team'] = _get_custom_field_value(fields, 'customfield_12003') # e.g., "Customer Success"
+        cleaned_data['brand'] = _get_custom_field_value(fields, 'customfield_11997') # e.g., ["Shell India", "Shell Indonesia"]
+        cleaned_data['product'] = _get_custom_field_value(fields, 'customfield_12024') # e.g., "Platforms"
+        cleaned_data['geo_region'] = _get_custom_field_value(fields, 'customfield_11998') # e.g., "SEA"
+        
+        # Identified from user input - Handles single or multi-select:
+        cleaned_data['environment'] = _get_custom_field_value(fields, 'customfield_11800') 
+        
+        # Identified from CAP-146316 log:
+        cleaned_data['root_cause'] = _get_custom_field_value(fields, 'customfield_11920') # e.g., ["Existing Bug in Application"]
+
+        # --- Sprint Field (customfield_10016) --- 
+        sprint_info = []
+        raw_sprint_data = fields.get('customfield_10016')
+        if isinstance(raw_sprint_data, list):
+            for sprint_str in raw_sprint_data:
+                if isinstance(sprint_str, str):
+                    # Extract name using regex from strings like '...name=Sprint Alpha,state=ACTIVE...'
+                    match = re.search(r'name=([^,]+)', sprint_str)
+                    if match:
+                        sprint_info.append(match.group(1).strip())
+                    else:
+                        logger.warning(f"Could not parse sprint name from raw string: {sprint_str}")
+                        # sprint_info.append(sprint_str) # Option: include raw string if parsing fails
+        elif raw_sprint_data:
+             logger.warning(f"Unexpected format for sprint data (customfield_10016): {type(raw_sprint_data)}")
+             # Potentially handle other formats if needed
+
+        cleaned_data['sprint'] = sprint_info if sprint_info else None # Store list of names or None
 
         # --- Clean Comments ---
-        raw_comments = structured_data.get('comments', [])
+        comment_data = fields.get('comment', {})
+        raw_comments = comment_data.get('comments', [])
         cleaned_comments = []
         
-        # Sort comments by creation date (oldest first)
-        # Requires parsing the date string
         def parse_jira_date(date_str):
-            if not date_str:
-                return None
-            try:
-                # Jira format often like: '2025-04-24T13:36:16.799+0530'
-                # Python's fromisoformat handles timezone offsets correctly
-                return datetime.fromisoformat(date_str)
-            except ValueError:
+            if not date_str: return None
+            try: return datetime.fromisoformat(date_str)
+            except ValueError: 
                 logger.warning(f"Could not parse date string: {date_str}")
-                return None # Or return a default date?
+                return None
 
-        # Sort comments, handling potential None dates
         sorted_comments = sorted(
             raw_comments, 
             key=lambda c: parse_jira_date(c.get('created')) or datetime.min
@@ -84,17 +134,78 @@ def clean_jira_data(structured_data):
         for comment in sorted_comments:
             cleaned_body, mentions = _parse_comment_body(comment.get('body', ''))
             cleaned_comments.append({
-                'author': comment.get('author', 'Unknown'),
+                'author': comment.get('author', {}).get('displayName', 'Unknown'),
                 'timestamp': comment.get('created'),
                 'cleaned_body': cleaned_body,
                 'mentions': mentions
             })
             
-        cleaned_metadata['comments'] = cleaned_comments
+        cleaned_data['comments'] = cleaned_comments
 
-        logger.info(f"Data cleaning complete for ticket {cleaned_metadata['ticket_id']}. Found {len(cleaned_comments)} comments.")
-        return cleaned_metadata
+        logger.info(f"Generic data cleaning complete for ticket {ticket_id}. Found {len(cleaned_comments)} comments.")
+        return cleaned_data
 
     except Exception as e:
-        logger.error(f"Unexpected error during data cleaning for ticket {structured_data.get('id')}: {e}", exc_info=True)
-        return None # Return None on failure 
+        logger.error(f"Unexpected error during generic data cleaning for ticket {ticket_id}: {e}", exc_info=True)
+        return None
+
+def prepare_ticket_data_for_summary(raw_issue_data, ticket_id):
+    """
+    Cleans raw Jira data and then prepares a subset of it specifically for summarization.
+    raw_issue_data is expected to be the 'raw' attribute of a Jira issue object.
+    """
+    logger.info(f"Preparing ticket data for summarization: {ticket_id}")
+    
+    # Step 1: Get all cleaned data
+    comprehensively_cleaned_data = clean_jira_data(raw_issue_data, ticket_id)
+
+    # --- BEGIN: Added log for comprehensively_cleaned_data ---
+    if comprehensively_cleaned_data:
+        logger.info(f"--- Comprehensively Cleaned Data for {ticket_id} (before summarization filtering) ---")
+        try:
+            formatted_cleaned_data = json.dumps(comprehensively_cleaned_data, indent=2, sort_keys=True, default=str) # default=str for datetime objects
+            for line in formatted_cleaned_data.splitlines():
+                logger.info(line)
+            logger.info(f"--- End of Comprehensively Cleaned Data for {ticket_id} ---")
+        except Exception as log_err:
+            logger.error(f"Error logging comprehensively_cleaned_data for {ticket_id}: {log_err}")
+            logger.info(f"Comprehensively Cleaned Data (raw fallback) for {ticket_id}: {comprehensively_cleaned_data}") # Fallback log
+    else:
+        logger.info(f"comprehensively_cleaned_data is None for {ticket_id}, skipping detailed log.")
+    # --- END: Added log for comprehensively_cleaned_data ---
+
+    if not comprehensively_cleaned_data:
+        logger.warning(f"Comprehensive cleaning failed for {ticket_id}. Cannot prepare for summary.")
+        return None
+
+    # Step 2: Select fields relevant for summarization
+    summary_relevant_data = {
+        'ticket_id': comprehensively_cleaned_data.get('ticket_id'),
+        'summary': comprehensively_cleaned_data.get('summary'),
+        'description': comprehensively_cleaned_data.get('description'),
+        'status': comprehensively_cleaned_data.get('status'),
+        'priority': comprehensively_cleaned_data.get('priority'),
+        'comments': comprehensively_cleaned_data.get('comments', []),
+        'labels': comprehensively_cleaned_data.get('labels', []),
+        'components': comprehensively_cleaned_data.get('components', []),
+        # Add the custom fields here IF they were successfully extracted by clean_jira_data
+        # Ensure these keys match what clean_jira_data produces (e.g., 'owned_by_team')
+        # 'owned_by_team': comprehensively_cleaned_data.get('owned_by_team'),
+        # 'brand': comprehensively_cleaned_data.get('brand'),
+        # 'product': comprehensively_cleaned_data.get('product'),
+        # 'geo_region': comprehensively_cleaned_data.get('geo_region'),
+        # 'environment': comprehensively_cleaned_data.get('environment'),
+        # Only include if they exist to avoid passing None or empty values unless desired
+    }
+    
+    # Add custom fields if they exist and are not None
+    custom_field_keys_for_summary = [
+        'owned_by_team', 'brand', 'product', 'geo_region', 'environment', 'root_cause', 'sprint' 
+        # Add the actual keys used in clean_jira_data once you define them based on customfield_ IDs
+    ]
+    for key in custom_field_keys_for_summary:
+        if key in comprehensively_cleaned_data and comprehensively_cleaned_data[key] is not None:
+            summary_relevant_data[key] = comprehensively_cleaned_data[key]
+
+    logger.info(f"Data prepared for summarization for ticket {ticket_id}.")
+    return summary_relevant_data 

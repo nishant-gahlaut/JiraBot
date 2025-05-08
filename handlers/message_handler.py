@@ -11,7 +11,7 @@ from utils.state_manager import conversation_states
 from services.genai_service import generate_jira_details
 from services.jira_service import extract_ticket_id_from_input, fetch_jira_ticket_data
 from services.summarize_service import summarize_jira_ticket
-from utils.data_cleaner import clean_jira_data
+from utils.data_cleaner import prepare_ticket_data_for_summary
 from slack_sdk.errors import SlackApiError
 
 logger = logging.getLogger(__name__)
@@ -128,20 +128,27 @@ def handle_message(message, client, context, logger):
                               client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
                           except Exception as se: logger.error(f"Error clearing status after invalid input: {se}")
                 else:
-                    jira_data = fetch_jira_ticket_data(ticket_id)
-                    if not jira_data:
+                    # Fetch the raw Jira issue object
+                    raw_jira_issue = fetch_jira_ticket_data(ticket_id)
+                    
+                    if not raw_jira_issue:
                         try:
-                            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"Sorry, I couldn't fetch data for ticket '{ticket_id}'. It might not exist, or there was an error. (Placeholder response)")
+                            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"Sorry, I couldn't fetch data for ticket '{ticket_id}'. It might not exist, or there was an error.")
                             logger.warning(f"Failed to fetch Jira data for {ticket_id} in thread {thread_ts}")
                         except Exception as e:
                             logger.error(f"Error posting data fetch failure message: {e}")
                     else:
-                        # Clean the fetched data
-                        cleaned_data = clean_jira_data(jira_data)
+                        # Prepare the data for summarization using the new function
+                        # It expects issue.raw and the ticket_id
+                        summary_relevant_data = None
+                        if hasattr(raw_jira_issue, 'raw') and raw_jira_issue.raw:
+                            summary_relevant_data = prepare_ticket_data_for_summary(raw_jira_issue.raw, ticket_id)
+                        else:
+                            logger.error(f"Fetched Jira issue for {ticket_id} is missing .raw attribute or it is empty.")
                         
-                        if not cleaned_data:
-                            # Handle cleaning error
-                            logger.error(f"Failed to clean Jira data for {ticket_id} in thread {thread_ts}")
+                        if not summary_relevant_data:
+                            # Handle cleaning/preparation error
+                            logger.error(f"Failed to prepare Jira data for summarization for {ticket_id} in thread {thread_ts}")
                             try:
                                 client.chat_postMessage(
                                     channel=channel_id,
@@ -149,11 +156,10 @@ def handle_message(message, client, context, logger):
                                     text=f"Sorry, there was an error processing the data for ticket '{ticket_id}'."
                                 )
                             except Exception as e:
-                                logger.error(f"Error posting data cleaning failure message: {e}")
+                                logger.error(f"Error posting data preparation failure message: {e}")
                         else:
-                            # Summarize Cleaned Data (Placeholder)
-                            # Pass cleaned_data instead of jira_data
-                            summary_result = summarize_jira_ticket(cleaned_data)
+                            # Summarize the prepared data
+                            summary_result = summarize_jira_ticket(summary_relevant_data)
     
                             if not summary_result:
                                 # Handle summarization error
