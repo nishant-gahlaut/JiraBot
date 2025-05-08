@@ -2,6 +2,7 @@
 import os
 import logging
 import google.generativeai as genai # Import Google GenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,28 @@ except ImportError:
     logger.warning("'google-generativeai' library not found. Please install it: pip install google-generativeai. GenAI features will be disabled.")
 except Exception as e:
     logger.error(f"Failed to configure Google Generative AI: {e}. GenAI features will be disabled.")
+
+
+
+
+def get_llm():
+    """Gets a configured LangChain LLM instance using Google's Gemini model."""
+    api_key = os.environ.get("GOOGLE_GENAI_KEY")
+    if not api_key:
+        logger.error("GOOGLE_GENAI_KEY environment variable not set. Cannot create LLM.")
+        return None
+
+    try:
+        _llm_instance = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            google_api_key=api_key,
+            convert_system_message_to_human=True
+        )
+        return _llm_instance
+    except Exception as e:
+        logger.error(f"Failed to create LLM instance: {e}")
+        return None
+         
 
 def generate_text(prompt):
     """Generates text using the configured Google GenAI model."""
@@ -76,6 +99,9 @@ def generate_jira_details(user_summary):
             "title": "Error Generating Title",
             "description": f"Could not generate details due to an error: {e}"
         }
+    
+
+    
     # --- End Placeholder Logic ---
 
     # --- Actual GenAI Logic (Example) ---
