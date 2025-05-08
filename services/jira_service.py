@@ -5,6 +5,8 @@ import os # For environment variables
 import json # Added for pretty-printing Jira raw data
 from jira import JIRA # Import the JIRA library
 from jira.exceptions import JIRAError # Import JIRAError for exception handling
+import requests # Ensure 'requests' library is installed
+from .jira_payload_mapper import build_jira_payload_fields # Import the new mapper
 
 logger = logging.getLogger(__name__)
 
@@ -149,3 +151,126 @@ def fetch_my_jira_tickets(assignee_id, period, status):
     except Exception as e:
         logger.error(f"Unexpected error searching issues for 'My Tickets': {e}")
         return None 
+
+def create_jira_ticket(ticket_data):
+    """
+    Creates a Jira ticket using the Jira REST API.
+
+    Args:
+        ticket_data (dict): A dictionary containing the ticket details, including:
+            - summary (str): The summary of the ticket.
+            - description (str): The description of the ticket.
+            - project_key (str): The Jira project key.
+            - issue_type (str): The name of the issue type (e.g., "Task", "Bug").
+            - priority (str, optional): The priority of the ticket (e.g., "P0", "P1"). 
+                                        Jira might expect a name or an ID here.
+                                        This example uses the value directly.
+            - assignee_id (str, optional): Slack user ID of the assignee. 
+                                           Mapping to Jira accountId will be needed.
+            - labels (list, optional): A list of labels.
+            # Add other fields from ticket_data as needed for Jira payload
+
+    Returns:
+        dict: A dictionary with "key", "id", and "url" of the created ticket on success.
+        None: On failure.
+    """
+    jira_base_url = os.environ.get("JIRA_BASE_URL") # e.g., https://your-domain.atlassian.net
+    jira_user_email = os.environ.get("JIRA_USER_EMAIL")
+    jira_api_token = os.environ.get("JIRA_API_TOKEN")
+
+    if not all([jira_base_url, jira_user_email, jira_api_token]):
+        logger.error("Jira API credentials (JIRA_BASE_URL, JIRA_USER_EMAIL, JIRA_API_TOKEN) are not fully configured.")
+        return None
+
+    api_url = f"{jira_base_url.rstrip('/')}/rest/api/3/issue"
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+    # Construct the payload using the new mapper
+    payload_fields = build_jira_payload_fields(ticket_data)
+    if not payload_fields:
+        logger.error("Failed to build Jira payload fields from ticket_data.")
+        return None
+
+    jira_payload = {"fields": payload_fields}
+
+    logger.debug(f"Jira API URL: {api_url}")
+    logger.debug(f"Jira API Payload: {json.dumps(jira_payload, indent=2)}")
+
+    try:
+        response = requests.post(
+            api_url,
+            data=json.dumps(jira_payload),
+            headers=headers,
+            auth=(jira_user_email, jira_api_token),
+            timeout=30  # 30 seconds timeout
+        )
+        response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
+
+        response_data = response.json()
+        logger.info(f"Successfully created Jira ticket: {response_data.get('key')}")
+        return {
+            "id": response_data.get("id"),
+            "key": response_data.get("key"),
+            "url": f"{jira_base_url.rstrip('/')}/browse/{response_data.get('key')}"
+        }
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error creating Jira ticket: {e.response.status_code} - {e.response.text}")
+        try:
+            error_details = e.response.json()
+            logger.error(f"Jira error messages: {error_details.get('errorMessages')}")
+            logger.error(f"Jira errors: {error_details.get('errors')}")
+        except ValueError: # If response is not JSON
+            logger.error("Jira error response was not in JSON format.")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error creating Jira ticket: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while creating Jira ticket: {e}")
+        return None
+
+# Ensure to add calls to this function from your action_handler.py
+# Example (in action_handler.py, inside handle_create_ticket_submission):
+#
+# from services.jira_service import create_jira_ticket # Import the function
+#
+# ... later in the function ...
+# if validation_passes:
+#     ack()
+#     # ... (extract metadata, collate ticket_data) ...
+#     project_key_from_env = os.environ.get("TICKET_CREATION_PROJECT_ID")
+#     # ... (handle if project_key_from_env is None) ...
+#
+#     # Update ticket_data with the correct project key before passing
+#     current_ticket_data = { 
+#         "summary": summary, 
+#         "description": description,
+#         "project_key": project_key_from_env, # Crucial: use the env var
+#         "issue_type": issue_type,
+#         "priority": priority,
+#         "assignee_id": assignee_id, # Slack ID, needs mapping
+#         "labels": labels
+#         # ... add other fields collected from modal ...
+#     }
+#
+#     jira_response = create_jira_ticket(current_ticket_data)
+#
+#     if jira_response:
+#         confirmation_text = f"Successfully created Jira ticket: <{jira_response['url']}|{jira_response['key']}>"
+#         # ... (add more details to confirmation_text if needed) ...
+#     else:
+#         confirmation_text = "Failed to create Jira ticket. Please check logs or contact an admin."
+#
+#     client.chat_postMessage(channel=original_channel_id, thread_ts=original_thread_ts, text=confirmation_text)
+
+
+# Placeholder for other existing functions
+# def fetch_my_jira_tickets(assignee_id, period, status): ...
+# def fetch_jira_ticket_data(ticket_id): ...
+# def prepare_ticket_data_for_summary(raw_jira_issue, ticket_id): ...
+# def summarize_jira_ticket(ticket_data_for_summary): ... 

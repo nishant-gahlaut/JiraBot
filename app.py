@@ -240,18 +240,18 @@ def handle_message_events(message, client, context, logger):
 if __name__ == "__main__":
     try:
         # Scrape Jira tickets from the specified project
-        project_key_to_scrape = os.environ.get("JIRA_PROJECT_KEY_TO_SCRAPE")
-        if project_key_to_scrape:
-            logger.info(f"Starting Jira scrape for project: {project_key_to_scrape}...")
-            scraped_count, total_available = scrape_and_store_tickets(project_key_to_scrape)
-            logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
-        else:
-            logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping on startup.")
+        # project_key_to_scrape = os.environ.get("JIRA_PROJECT_KEY_TO_SCRAPE")
+        # if project_key_to_scrape:
+        #     logger.info(f"Starting Jira scrape for project: {project_key_to_scrape}...")
+        #     scraped_count, total_available = scrape_and_store_tickets(project_key_to_scrape)
+        #     logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
+        # else:
+        #     logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping on startup.")
 
+        logger.info("Starting Socket Mode Handler...")
         # Use SocketModeHandler for development/testing without exposing a public URL
         # Requires SLACK_APP_TOKEN (App-Level Token with connections:write scope)
         handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-        logger.info("Starting Socket Mode handler...")
         handler.start()
     except KeyError as e:
         logger.error(f"Missing environment variable: {e}. Ensure SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, and SLACK_APP_TOKEN are set in .env")

@@ -2,10 +2,12 @@
 import logging
 from slack_sdk.errors import SlackApiError # Import SlackApiError
 import json # For private_metadata
+import os # Ensure os is imported
 
 # Import state store from utils
 # from state_manager import conversation_states # Old import
 from utils.state_manager import conversation_states # Corrected import
+from services.jira_service import create_jira_ticket # Import the Jira service function
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,22 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                 },
                 "label": {"type": "plain_text", "text": "Description (Optional)"},
                 "optional": True
+            },
+            {
+                "type": "input",
+                "block_id": "issue_type_block",
+                "element": {
+                    "type": "static_select",
+                    "action_id": "issue_type_select",
+                    "placeholder": {"type": "plain_text", "text": "Select issue type"},
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Task"}, "value": "Task"},
+                        {"text": {"type": "plain_text", "text": "Bug"}, "value": "Bug"},
+                        {"text": {"type": "plain_text", "text": "Story"}, "value": "Story"},
+                        {"text": {"type": "plain_text", "text": "Epic"}, "value": "Epic"}
+                    ]
+                },
+                "label": {"type": "plain_text", "text": "Issue Type"}
             },
             {
                 "type": "input",
@@ -167,6 +185,24 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                 },
                 "label": {"type": "plain_text", "text": "Type of Task (Optional)"},
                 "optional": True
+            },
+            {
+                "type": "input",
+                "block_id": "root_cause_block",
+                "element": {
+                    "type": "multi_static_select",
+                    "action_id": "root_cause_select",
+                    "placeholder": {"type": "plain_text", "text": "Select root cause(s) (optional)"},
+                    "options": [
+                        {"text": {"type": "plain_text", "text": "Existing Bug in Application"}, "value": "existing_bug"},
+                        {"text": {"type": "plain_text", "text": "Data Issue"}, "value": "data_issue"},
+                        {"text": {"type": "plain_text", "text": "Configuration Error"}, "value": "config_error"},
+                        {"text": {"type": "plain_text", "text": "New Requirement/Change Request"}, "value": "new_requirement"},
+                        {"text": {"type": "plain_text", "text": "Other"}, "value": "other"}
+                    ]
+                },
+                "label": {"type": "plain_text", "text": "Root Cause(s) (Optional)"},
+                "optional": True
             }
             # TODO: Add Project Key and Issue Type selectors later
             # These often require dynamic population from Jira API
@@ -260,6 +296,10 @@ def handle_create_ticket_submission(ack, body, client, logger):
     try:
         summary = state_values["summary_block"]["summary_input"]["value"]
         description = state_values["description_block"]["description_input"].get("value", "") # Optional field
+        
+        issue_type_option = state_values["issue_type_block"]["issue_type_select"].get("selected_option")
+        issue_type = issue_type_option["value"] if issue_type_option else None
+
         priority_option = state_values["priority_block"]["priority_select"].get("selected_option")
         priority = priority_option["value"] if priority_option else None # Handle if not selected
         assignee_id = state_values["assignee_block"]["assignee_select"].get("selected_user") # Optional field
@@ -283,11 +323,28 @@ def handle_create_ticket_submission(ack, body, client, logger):
         task_type_options = state_values["task_type_block"]["task_type_select"].get("selected_options", [])
         task_types = [opt["value"] for opt in task_type_options] if task_type_options else []
 
+        root_cause_options = state_values["root_cause_block"]["root_cause_select"].get("selected_options", [])
+        root_causes = [opt["value"] for opt in root_cause_options] if root_cause_options else []
+
     except KeyError as e:
         logger.error(f"Error extracting modal submission values: Missing key {e}")
         # Identify block_id from the key error if possible
         block_id_match = str(e).strip("'")
-        error_block = block_id_match if block_id_match in ["summary_block", "description_block", "priority_block", "assignee_block", "label_block", "team_block", "brand_block", "environment_block", "product_block", "task_type_block"] else "summary_block" # Default to summary
+        error_block_map = {
+            "summary_block": "summary_block", 
+            "description_block": "description_block",
+            "issue_type_block": "issue_type_block",
+            "priority_block": "priority_block", 
+            "assignee_block": "assignee_block", 
+            "label_block": "label_block", 
+            "team_block": "team_block", 
+            "brand_block": "brand_block", 
+            "environment_block": "environment_block", 
+            "product_block": "product_block", 
+            "task_type_block": "task_type_block",
+            "root_cause_block": "root_cause_block"
+        }
+        error_block = error_block_map.get(block_id_match, "summary_block") # Default to summary
         ack({"response_action": "errors", "errors": {error_block: f"Error processing input: {e}"}})
         return
 
@@ -295,6 +352,8 @@ def handle_create_ticket_submission(ack, body, client, logger):
     errors = {}
     if not summary or summary.isspace():
         errors["summary_block"] = "Summary cannot be empty."
+    if not issue_type: # Added validation for issue_type
+        errors["issue_type_block"] = "Please select an Issue Type."
     # Add more validation if needed (e.g., priority selected)
     if not priority:
          errors["priority_block"] = "Please select a priority."
@@ -320,38 +379,66 @@ def handle_create_ticket_submission(ack, body, client, logger):
         # Or log and fail gracefully
         return 
         
-    # Collate data for Jira (Placeholder for actual creation)
-    ticket_data = {
+    # Collate data for Jira
+    project_key_from_env = os.environ.get("TICKET_CREATION_PROJECT_ID")
+    if not project_key_from_env:
+        logger.error("TICKET_CREATION_PROJECT_ID environment variable not set.")
+        try:
+            client.chat_postMessage(
+                channel=original_channel_id,
+                thread_ts=original_thread_ts,
+                text=f"<@{submitter_user_id}> I couldn't create the Jira ticket because the Project ID is not configured in the bot. Please contact an administrator."
+            )
+        except Exception as e_post:
+            logger.error(f"Error posting project ID missing message: {e_post}")
+        return
+
+    ticket_data_for_jira = {
         "summary": summary,
         "description": description,
+        "project_key": project_key_from_env, 
+        "issue_type": issue_type, 
         "priority": priority, 
-        "assignee_id": assignee_id, # This is the Slack User ID
-        # TODO: Map Slack User ID to Jira User ID if necessary
+        "assignee_id": assignee_id, # This is the Slack User ID, mapping to Jira ID is a TODO in jira_service
         "labels": labels,
-        "team": team,
+        "team": team, # This and following fields need mapping to custom fields in jira_service if required
         "brand": brand,
         "environment": environment,
         "product": product,
-        "task_types": task_types
-        # TODO: Add Project Key, Issue Type when those fields are added to modal
+        "task_types": task_types,
+        "root_causes": root_causes
     }
-    logger.info(f"Modal submitted. Data for Jira (placeholder): {ticket_data}")
+    logger.info(f"Attempting to create Jira ticket with data: {ticket_data_for_jira}")
+
+    # Call Jira service to create the ticket
+    jira_response = create_jira_ticket(ticket_data_for_jira)
 
     # Post confirmation message back to the original thread
-    confirmation_text = (
-        f"<@{submitter_user_id}> initiated Jira ticket creation:\n"
-        f"*Summary*: {summary}\n"
-        f"*Priority*: {priority or 'Not Set'}\n"
-        f"*Assignee*: {f'<@{assignee_id}>' if assignee_id else 'Unassigned'}\n"
-        # Display new fields if selected
-        + (f"*Labels*: { ', '.join(labels)}\n" if labels else "")
-        + (f"*Team*: {team}\n" if team else "")
-        + (f"*Brand*: {brand}\n" if brand else "")
-        + (f"*Environment*: {environment}\n" if environment else "")
-        + (f"*Product*: {product}\n" if product else "")
-        + (f"*Task Types*: { ', '.join(task_types)}\n" if task_types else "")
-        + "\n(Simulating ticket creation... Jira API call not implemented yet.)"
-    )
+    if jira_response and jira_response.get("key") and jira_response.get("url"):
+        confirmation_text = (
+            f"<@{submitter_user_id}>, your Jira ticket has been successfully created!\n\n"
+            f"*Ticket*: <{jira_response['url']}|{jira_response['key']}>\n"
+            f"*Project*: {project_key_from_env}\n"
+            f"*Issue Type*: {issue_type or 'Not Set'}\n"
+            f"*Summary*: {summary}\n"
+            f"*Priority*: {priority or 'Not Set'}\n"
+            f"*Assignee*: {f'<@{assignee_id}>' if assignee_id else 'Unassigned (or mapping pending)'}\n"
+            + (f"*Labels*: {', '.join(labels)}\n" if labels else "")
+            + (f"*Team*: {team}\n" if team else "") # These custom fields are displayed as is for now
+            + (f"*Brand*: {brand}\n" if brand else "")
+            + (f"*Environment*: {environment}\n" if environment else "")
+            + (f"*Product*: {product}\n" if product else "")
+            + (f"*Task Types*: {', '.join(task_types)}\n" if task_types else "")
+            + (f"*Root Cause(s)*: {', '.join(root_causes)}\n" if root_causes else "")
+        )
+        logger.info(f"Successfully created Jira ticket {jira_response['key']}. Confirmation posted to Slack.")
+    else:
+        confirmation_text = (
+            f"<@{submitter_user_id}>, there was an error creating your Jira ticket. \n"
+            f"Our team has been notified. Please try again later or contact support if the issue persists."
+        )
+        logger.error(f"Failed to create Jira ticket. Jira service response: {jira_response}")
+
     try:
         client.chat_postMessage(
             channel=original_channel_id,
