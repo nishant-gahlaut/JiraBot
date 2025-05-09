@@ -1,0 +1,273 @@
+import logging
+import json
+from slack_sdk.errors import SlackApiError
+from utils.state_manager import conversation_states
+from services.genai_service import generate_jira_details
+from handlers.modals.interaction_handlers import build_create_ticket_modal
+
+logger = logging.getLogger(__name__)
+
+def handle_create_ticket_action(ack, body, client, logger):
+    """Handles the 'Create Ticket' button click by asking for initial summary/description."""
+    ack() # Acknowledge the button click immediately
+    logger.info("'Create Ticket' button clicked. Asking for initial description.")
+
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    thread_ts = body["message"]["thread_ts"]
+    assistant_id = body.get("assistant", {}).get("id") # Get assistant_id if available
+
+    # Set state to await the user's initial description
+    conversation_states[thread_ts] = {
+        "step": "awaiting_initial_summary",
+        "user_id": user_id,
+        "channel_id": channel_id,
+        "assistant_id": assistant_id,
+        "data": {}
+    }
+    logger.info(f"Set state for thread {thread_ts} to 'awaiting_initial_summary'")
+
+    # Ask for the initial description
+    try:
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="Okay, let's start creating a Jira ticket. Please describe the issue or request:"
+        )
+        if assistant_id:
+            client.assistant_threads_setStatus(
+                assistant_id=assistant_id,
+                thread_ts=thread_ts,
+                status=""
+            )
+    except Exception as e:
+        logger.error(f"Error posting initial summary request: {e}")
+
+def handle_continue_after_ai(ack, body, client, logger):
+    """Handles the 'Continue' button click after AI suggestion. Opens the modal."""
+    ack()
+    logger.info("'Continue after AI' button clicked.")
+
+    trigger_id = body["trigger_id"]
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    thread_ts = body["message"]["thread_ts"]
+
+    current_state = conversation_states.get(thread_ts)
+    if not current_state or current_state["step"] != "awaiting_ai_confirmation":
+        logger.warning(f"Received 'continue_after_ai' action for thread {thread_ts} but state is not awaiting_ai_confirmation: {current_state}")
+        try:
+             client.chat_postEphemeral(channel=channel_id, thread_ts=thread_ts, user=user_id, text="Sorry, something went wrong. Please try starting over.")
+        except Exception as e:
+             logger.error(f"Error posting ephemeral error message: {e}")
+        return
+
+    initial_description = current_state["data"].get("initial_description", "")
+    suggested_title = current_state["data"].get("suggested_title", "")
+
+    metadata = {
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "user_id": user_id
+    }
+
+    try:
+        modal_view = build_create_ticket_modal(
+            initial_summary=suggested_title,
+            initial_description=initial_description,
+            private_metadata=json.dumps(metadata)
+        )
+        client.views_open(trigger_id=trigger_id, view=modal_view)
+        logger.info(f"Opened create ticket modal for user {user_id} after AI confirmation (thread {thread_ts})")
+    except SlackApiError as e:
+        logger.error(f"Slack API Error opening modal after AI confirm: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Error opening create ticket modal after AI confirm: {e}")
+
+def handle_modify_after_ai(ack, body, client, logger):
+    """Handles the 'Modify' button click after AI suggestion. Opens the modal for editing."""
+    ack()
+    logger.info("'Modify after AI' button clicked. Opening modal for editing.")
+
+    trigger_id = body["trigger_id"]
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    thread_ts = body["message"]["thread_ts"]
+
+    current_state = conversation_states.get(thread_ts)
+    if not current_state or current_state["step"] != "awaiting_ai_confirmation":
+        logger.warning(f"Received 'modify_after_ai' action for thread {thread_ts} but state is not awaiting_ai_confirmation: {current_state}")
+        try:
+             client.chat_postEphemeral(channel=channel_id, thread_ts=thread_ts, user=user_id, text="Sorry, something went wrong. Please try starting over.")
+        except Exception as e:
+             logger.error(f"Error posting ephemeral error message: {e}")
+        return
+
+    initial_description = current_state["data"].get("initial_description", "")
+    suggested_title = current_state["data"].get("suggested_title", "")
+
+    metadata = {
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "user_id": user_id
+    }
+
+    try:
+        modal_view = build_create_ticket_modal(
+            initial_summary=suggested_title,
+            initial_description=initial_description,
+            private_metadata=json.dumps(metadata)
+        )
+        client.views_open(trigger_id=trigger_id, view=modal_view)
+        logger.info(f"Opened create ticket modal for user {user_id} for modification (thread {thread_ts})")
+    except SlackApiError as e:
+        logger.error(f"Slack API Error opening modal for modification: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Error opening create ticket modal for modification: {e}")
+
+def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
+    """Handles the 'Proceed with this Description' button after duplicate check."""
+    ack()
+    logger.info("'Proceed with this Description' button clicked after duplicate check.")
+    assistant_id = None
+    thread_ts = None
+
+    try:
+        action_value = json.loads(body["actions"][0]["value"])
+        initial_description = action_value["initial_description"]
+        thread_ts = str(action_value["thread_ts"])
+        channel_id = str(action_value["channel_id"])
+        user_id = str(action_value["user_id"])
+        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
+
+        logger.info(f"Thread {thread_ts}: Proceeding with description: '{initial_description[:100]}...'")
+
+        if assistant_id:
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="Generating suggestion...")
+                logger.info(f"Thread {thread_ts}: Set status to 'Generating suggestion...'")
+            except Exception as e:
+                logger.error(f"Thread {thread_ts}: Error setting status before GenAI for initial title: {e}")
+
+        generated_details = generate_jira_details(initial_description)
+        suggested_title = generated_details.get("title", "Suggestion Error")
+        logger.info(f"Thread {thread_ts}: GenAI suggested title: '{suggested_title}'")
+
+        conversation_states[thread_ts] = {
+            "step": "awaiting_ai_confirmation",
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "assistant_id": assistant_id,
+            "data": {
+                "initial_description": initial_description,
+                "suggested_title": suggested_title
+            }
+        }
+        logger.info(f"Thread {thread_ts}: Updated state to 'awaiting_ai_confirmation' with data.")
+
+        ai_confirmation_blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Thanks! Based on your description, I suggest the following:\\n\\n*Suggested Title:* {suggested_title}\\n\\n*Your Description:*```{initial_description}```\\n\\nWould you like to proceed with these details or modify them?"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "Continue", "emoji": True}, "style": "primary", "action_id": "continue_after_ai"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Modify", "emoji": True}, "action_id": "modify_after_ai"}
+                ]
+            }
+        ]
+
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            blocks=ai_confirmation_blocks,
+            text=f"Suggested Title: {suggested_title}"
+        )
+        logger.info(f"Thread {thread_ts}: Posted AI title suggestion and Continue/Modify buttons.")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_proceed_to_ai_title_suggestion: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_proceed_to_ai_title_suggestion: {e}")
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_proceed_to_ai_title_suggestion: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_proceed_to_ai_title_suggestion: {e}", exc_info=True)
+    finally:
+        if assistant_id and thread_ts:
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
+                logger.info(f"Thread {thread_ts}: Cleared status after proceeding to AI title suggestion.")
+            except Exception as se:
+                logger.error(f"Thread {thread_ts}: Error clearing status: {se}")
+
+def handle_refine_description_after_duplicates(ack, body, client, logger):
+    """Handles 'Refine My Description' button after duplicate check."""
+    ack()
+    logger.info("'Refine My Description' button clicked.")
+    try:
+        action_value = json.loads(body["actions"][0]["value"])
+        thread_ts = str(action_value["thread_ts"])
+        channel_id = str(action_value["channel_id"])
+        user_id = str(action_value["user_id"])
+        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
+
+        conversation_states[thread_ts] = {
+            "step": "awaiting_initial_summary",
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "assistant_id": assistant_id,
+            "data": {}
+        }
+        logger.info(f"Thread {thread_ts}: Set state back to 'awaiting_initial_summary' for refinement.")
+
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="Okay, let's try again. Please provide your refined description for the Jira ticket:"
+        )
+        logger.info(f"Thread {thread_ts}: Prompted user for refined description.")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_refine_description: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_refine_description: {e}")
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_refine_description: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_refine_description: {e}", exc_info=True)
+
+def handle_cancel_creation_at_message_duplicates(ack, body, client, logger):
+    """Handles 'Cancel Ticket Creation' from the duplicate check message step."""
+    ack()
+    logger.info("'Cancel Ticket Creation' button clicked at duplicate message step.")
+    try:
+        action_value = json.loads(body["actions"][0]["value"])
+        thread_ts = str(action_value["thread_ts"])
+        channel_id = body["channel"]["id"]
+        user_id = body["user"]["id"]
+
+        if thread_ts in conversation_states:
+            del conversation_states[thread_ts]
+            logger.info(f"Thread {thread_ts}: Cleared conversation state due to cancellation.")
+        
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=f"<@{user_id}>, the Jira ticket creation process has been cancelled."
+            )
+        logger.info(f"Thread {thread_ts}: Posted ticket creation cancellation message.")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_cancel_creation: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_cancel_creation: {e}")
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_cancel_creation: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_cancel_creation: {e}", exc_info=True) 

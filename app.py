@@ -17,18 +17,30 @@ logger = logging.getLogger(__name__)
 from utils.state_manager import conversation_states
 
 # Import action handlers
-from handlers.action_handler import (
+# from handlers.action_handler import (
+#     handle_create_ticket_action, MOVED
+#     handle_summarize_ticket_action,
+#     handle_continue_after_ai, MOVED
+#     handle_modify_after_ai, MOVED
+#     handle_proceed_to_ai_title_suggestion, MOVED
+#     handle_summarize_individual_duplicates_from_message,
+#     handle_refine_description_after_duplicates, MOVED
+#     handle_cancel_creation_at_message_duplicates, MOVED
+#     handle_summarize_specific_duplicate_ticket
+# )
+# Import modal submission handler from its new location
+from handlers.modals.interaction_handlers import handle_create_ticket_submission
+
+# Import ticket creation flow handlers from their new location
+from handlers.action_sequences.creation_handlers import (
     handle_create_ticket_action,
-    handle_summarize_ticket_action,
-    handle_create_ticket_submission,
     handle_continue_after_ai,
     handle_modify_after_ai,
     handle_proceed_to_ai_title_suggestion,
-    handle_summarize_individual_duplicates_from_message,
     handle_refine_description_after_duplicates,
-    handle_cancel_creation_at_message_duplicates,
-    handle_summarize_specific_duplicate_ticket
+    handle_cancel_creation_at_message_duplicates
 )
+
 from handlers.my_tickets_handler import (
     handle_my_tickets_initial_action,
     handle_my_tickets_period_selection,
@@ -48,6 +60,13 @@ from utils.jira_scraper import scrape_and_store_tickets
 
 # Import the ingestion pipeline runner
 from pipelines.ingestion_pipeline import run_ingestion_pipeline
+
+# Import summarization handlers from handlers.flows.summarization_handlers
+from handlers.action_sequences.summarization_handlers import (
+    handle_summarize_ticket_action,
+    handle_summarize_individual_duplicates_from_message,
+    handle_summarize_specific_duplicate_ticket
+)
 
 # Load environment variables from .env file
 load_dotenv()
