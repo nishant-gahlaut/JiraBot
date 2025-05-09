@@ -121,10 +121,19 @@ def clean_jira_data(raw_issue_data, ticket_id):
         
         def parse_jira_date(date_str):
             if not date_str: return None
-            try: return datetime.fromisoformat(date_str)
+            # Python's %z can handle offsets like +0530 or -0700 directly if they don't have a colon.
+            # If Jira ever includes a colon (e.g., +05:30), this might need adjustment or preprocessing.
+            # The format YYYY-MM-DDTHH:MM:SS.mmm+ZZZZ (e.g., 2025-04-27T10:11:35.923+0530)
+            # matches "%Y-%m-%dT%H:%M:%S.%f%z"
+            try: 
+                return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S.%f%z")
             except ValueError: 
-                logger.warning(f"Could not parse date string: {date_str}")
-                return None
+                # Fallback for dates that might not have microseconds (less common from APIs but possible)
+                try:
+                    return datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S%z")
+                except ValueError:
+                    logger.warning(f"Could not parse date string with multiple formats: {date_str}")
+                    return None
 
         sorted_comments = sorted(
             raw_comments, 

@@ -52,8 +52,17 @@ def handle_message(message, client, context, logger):
 
                 logger.info(f"Thread {thread_ts}: Calling find_and_summarize_duplicates for query: '{user_text[:100]}...'" )
                 duplicate_results = find_and_summarize_duplicates(user_query=user_text)
-                top_tickets = duplicate_results.get("top_tickets", [])
+                
+                # DETAILED LOGGING ADDED HERE
+                logger.info(f"Thread {thread_ts}: Raw duplicate_results from service: {json.dumps(duplicate_results, default=str)}")
+                
+                top_tickets = duplicate_results.get("tickets", [])
                 overall_summary = duplicate_results.get("summary", "Could not generate an overall summary for similar tickets.")
+                
+                logger.info(f"Thread {thread_ts}: 'top_tickets' variable after .get(): {json.dumps(top_tickets, default=str)}")
+                logger.info(f"Thread {thread_ts}: Length of 'top_tickets' to be checked: {len(top_tickets)}")
+                # END OF DETAILED LOGGING
+                
                 logger.info(f"Thread {thread_ts}: Duplicate detection found {len(top_tickets)} potential matches." )
 
                 button_context_value = {
@@ -75,13 +84,18 @@ def handle_message(message, client, context, logger):
                 ]
 
                 if top_tickets:
-                    for i, doc in enumerate(top_tickets):
-                        ticket_id_meta = doc.metadata.get('ticket_id', f'Similar Ticket {i+1}')
-                        ticket_url_meta = doc.metadata.get('url')
-                        preview_text = doc.page_content[:150].replace('\n', ' ') + "..."
+                    for i, ticket_dict in enumerate(top_tickets):
+                        current_metadata = ticket_dict.get('metadata', {})
+                        page_content = ticket_dict.get('page_content', '')
+
+                        ticket_id_meta = current_metadata.get('ticket_id', f'Similar Ticket {i+1}')
+                        ticket_url_meta = current_metadata.get('url')
+                        
+                        preview_text = page_content[:150].replace('\n', ' ') + "..."
                         ticket_display_text = f"*{ticket_id_meta}*"
                         if ticket_url_meta:
                             ticket_display_text = f"*<{ticket_url_meta}|{ticket_id_meta}>*"
+                        
                         blocks_for_duplicates.extend([
                             {
                                 "type": "section",
@@ -89,6 +103,23 @@ def handle_message(message, client, context, logger):
                                     "type": "mrkdwn",
                                     "text": f"{ticket_display_text}\n*Preview:* {preview_text}"
                                 }
+                            },
+                            {
+                                "type": "actions",
+                                "elements": [
+                                    {
+                                        "type": "button",
+                                        "text": {"type": "plain_text", "text": "Summarize this ticket", "emoji": True},
+                                        "action_id": "summarize_specific_duplicate_ticket",
+                                        "value": json.dumps({
+                                            "ticket_id_to_summarize": ticket_id_meta,
+                                            "thread_ts": str(thread_ts),
+                                            "channel_id": original_channel_id,
+                                            "user_id": original_user_id,
+                                            "assistant_id": original_assistant_id
+                                        })
+                                    }
+                                ]
                             },
                             {"type": "divider"}
                         ])
@@ -103,39 +134,20 @@ def handle_message(message, client, context, logger):
                         "text": {"type": "mrkdwn", "text": "I didn't find any strong matches for existing tickets. You can proceed with creating a new one."}
                     })
 
-                action_buttons = [
+                # Main action buttons - "Summarize Individual Tickets" is removed from here.
+                main_action_buttons = [
                     {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Proceed with this Description", "emoji": True},
                         "style": "primary",
                         "action_id": "proceed_to_ai_title_suggestion",
                         "value": json.dumps(button_context_value)
-                    }
-                ]
-                if top_tickets: # Only add summarize button if there are tickets
-                    action_buttons.append({
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Summarize Individual Tickets", "emoji": True},
-                        "action_id": "summarize_individual_duplicates_message_step",
-                        "value": json.dumps({
-                            "user_query": user_text,
-                            "tickets_data": [{'metadata': t.metadata, 'page_content': t.page_content} for t in top_tickets],
-                            "original_context": button_context_value
-                        }),
-                        "confirm": {
-                            "title": {"type": "plain_text", "text": "Are you sure?"},
-                            "text": {"type": "mrkdwn", "text": f"This will post {len(top_tickets)} individual summary message(s) for the found tickets."},
-                            "confirm": {"type": "plain_text", "text": "Yes, Summarize"},
-                            "deny": {"type": "plain_text", "text": "Cancel"}
-                        }
-                    })
-                
-                action_buttons.extend([
+                    },
                      {
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Refine My Description", "emoji": True},
                         "action_id": "refine_description_after_duplicates",
-                        "value": json.dumps(button_context_value) # Pass context for restarting
+                        "value": json.dumps(button_context_value)
                     },
                     {
                         "type": "button",
@@ -144,9 +156,9 @@ def handle_message(message, client, context, logger):
                         "action_id": "cancel_creation_at_message_duplicates",
                         "value": json.dumps({"thread_ts": str(thread_ts)})
                     }
-                ])
+                ]
                 
-                blocks_for_duplicates.append({"type": "actions", "elements": action_buttons})
+                blocks_for_duplicates.append({"type": "actions", "elements": main_action_buttons})
 
                 try:
                     client.chat_postMessage(

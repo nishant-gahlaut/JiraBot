@@ -20,91 +20,102 @@ BATCH_SIZE = 100
 # def init_local_db(db_path=DB_NAME):
 #     ...
 
-def scrape_and_store_tickets(project_key, csv_path=CSV_FILENAME):
-    """Scrapes tickets from a project in batches and stores cleaned data locally in a CSV file."""
+def scrape_and_store_tickets(project_key: str, total_tickets_to_scrape: int, api_batch_size: int = 100, csv_path: str = CSV_FILENAME):
+    """Scrapes a specified total number of tickets from a project in batches and stores cleaned data locally in a CSV file."""
     if not jira_client:
         logger.error("Jira client not initialized. Cannot scrape tickets.")
-        return 0, 0 # Scraped 0, Total 0
-
-    if not project_key:
-        logger.error("No PROJECT_KEY_TO_SCRAPE provided. Cannot scrape tickets.")
         return 0, 0
 
-    # JQL to fetch issues in the project, ordered by updated date
+    if not project_key:
+        logger.error("No project_key provided. Cannot scrape tickets.")
+        return 0, 0
+    
+    if total_tickets_to_scrape <= 0:
+        logger.warning("total_tickets_to_scrape is zero or negative. No tickets will be scraped.")
+        return 0, 0
+
     jql = f'project = "{project_key}" ORDER BY updated DESC'
-    # Update log to mention CSV and batch limit
-    logger.info(f"Starting Jira scrape for the first batch (up to {BATCH_SIZE}) of tickets in project '{project_key}' using JQL: {jql}")
-    logger.info(f"Output will be stored in: {csv_path}")
+    logger.info(f"Starting Jira scrape for up to {total_tickets_to_scrape} tickets in project '{project_key}' using JQL: {jql}")
+    logger.info(f"API batch size: {api_batch_size}. Output CSV: {csv_path}")
 
     start_at = 0
-    total_fetched_count = 0
-    total_available = 0 # Will get this from the first API call
+    total_fetched_this_run = 0
+    total_available_in_jira = 0 # Will get this from the first API call
     processed_count = 0
     error_count = 0
     
-    # Define CSV header columns based on clean_jira_data output
     header_columns = [
         'ticket_id', 'summary', 'description', 'status', 'priority', 
         'reporter', 'assignee', 'created_at', 'updated_at', 'labels', 
         'components', 'owned_by_team', 'brand', 'product', 'geo_region', 
-        'environment', 'root_cause', 'sprint', 'comments'
+        'environment', 'root_cause', 'sprint', 'comments', 'url' # Ensure URL is in headers if clean_jira_data provides it
     ]
 
     try:
-        # Open CSV file for writing
         with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
             csv_writer = csv.writer(csvfile)
-            # Write header row
             csv_writer.writerow(header_columns)
             logger.info(f"Opened '{csv_path}' and wrote header row.")
 
-            # Remove SQLite connection
-            # conn = sqlite3.connect(db_path)
-            # cursor = conn.cursor()
+            while total_fetched_this_run < total_tickets_to_scrape:
+                # Determine how many to fetch in this batch
+                remaining_to_scrape_overall = total_tickets_to_scrape - total_fetched_this_run
+                current_batch_max_results = min(api_batch_size, remaining_to_scrape_overall)
 
-            while True:
-                logger.info(f"Fetching issues batch: startAt={start_at}, maxResults={BATCH_SIZE}")
+                if current_batch_max_results <= 0: # Should not happen if loop condition is correct, but as safeguard
+                    logger.info("Target number of tickets to scrape has been reached (or current_batch_max_results is 0). Ending fetch.")
+                    break
+
+                logger.info(f"Fetching issues batch: startAt={start_at}, maxResults={current_batch_max_results}")
                 try:
                     search_results = jira_client.search_issues(
                         jql, 
                         startAt=start_at, 
-                        maxResults=BATCH_SIZE, 
+                        maxResults=current_batch_max_results, 
                         fields='*all', 
-                        expand='changelog'
+                        expand='changelog' # Consider if changelog is always needed, it adds to response size
                     )
                 except JIRAError as e:
                     logger.error(f"JIRA API Error fetching batch startAt {start_at}: {e.status_code} - {e.text}")
-                    error_count += BATCH_SIZE 
+                    # Decide on retry/skip strategy. For now, simple skip of this batch attempt.
+                    error_count += current_batch_max_results 
                     time.sleep(5) 
-                    start_at += BATCH_SIZE
-                    if total_available > 0 and start_at >= total_available:
-                        logger.warning("Stopping due to API error after trying to fetch past total.") 
+                    start_at += current_batch_max_results # Advance start_at to attempt next logical block if API error was for a range
+                    if total_available_in_jira > 0 and start_at >= total_available_in_jira:
+                        logger.warning(f"Stopping due to API error; attempted to fetch past total available tickets ({total_available_in_jira}).")
                         break 
+                    if total_fetched_this_run + (start_at - total_fetched_this_run) >= total_tickets_to_scrape: # If next start_at would exceed scrape goal
+                        logger.warning("Stopping due to API error; advancing start_at would exceed total_tickets_to_scrape.")
+                        break
                     continue 
                 except Exception as e:
                      logger.error(f"Unexpected error fetching batch startAt {start_at}: {e}", exc_info=True)
-                     error_count += BATCH_SIZE
+                     error_count += current_batch_max_results
                      time.sleep(5)
-                     start_at += BATCH_SIZE
-                     if total_available > 0 and start_at >= total_available:
-                         logger.warning("Stopping due to unexpected error after trying to fetch past total.")
+                     start_at += current_batch_max_results
+                     if total_available_in_jira > 0 and start_at >= total_available_in_jira:
+                         logger.warning("Stopping due to unexpected error; attempted to fetch past total available.")
+                         break
+                     if total_fetched_this_run + (start_at - total_fetched_this_run) >= total_tickets_to_scrape:
+                         logger.warning("Stopping due to unexpected error; advancing start_at would exceed total_tickets_to_scrape.")
                          break
                      continue
 
-                if start_at == 0: # First batch
-                    total_available = search_results.total
-                    logger.info(f"Total available tickets matching query in project: {total_available}")
+                if start_at == 0 and search_results: # First successful batch
+                    total_available_in_jira = search_results.total
+                    logger.info(f"Total available tickets matching query in Jira: {total_available_in_jira}")
+                    if total_tickets_to_scrape > total_available_in_jira:
+                        logger.warning(f"Requested {total_tickets_to_scrape} tickets, but only {total_available_in_jira} are available in Jira. Will scrape all available.")
+                        total_tickets_to_scrape = total_available_in_jira # Adjust goal to what's actually available
 
-                if not search_results:
-                    logger.info(f"No more issues found after startAt={start_at}. Ending fetch.")
-                    break # Exit loop if no issues are returned
+                if not search_results: # Corrected: ResultList itself is the list/iterable
+                    logger.info(f"No more issues found from Jira after startAt={start_at} or current batch is empty. Ending fetch.")
+                    break 
                     
-                batch_issue_count = len(search_results)
-                total_fetched_count += batch_issue_count
-                logger.info(f"Fetched batch of {batch_issue_count} issues (Total fetched so far: {total_fetched_count}/{total_available})")
+                batch_issue_count = len(search_results) # Corrected: Get length directly from ResultList
+                logger.info(f"Fetched batch of {batch_issue_count} issues. (Total fetched this run so far: {total_fetched_this_run + batch_issue_count}/{total_tickets_to_scrape}) | Jira Total: {total_available_in_jira}")
 
-                # Process issues in the current batch
-                for issue in search_results:
+                for issue in search_results: # Corrected: Iterate directly over ResultList
                     try:
                         if not hasattr(issue, 'raw') or not issue.raw:
                             logger.warning(f"Issue {issue.key} is missing .raw attribute. Skipping.")
@@ -118,55 +129,30 @@ def scrape_and_store_tickets(project_key, csv_path=CSV_FILENAME):
                             error_count += 1
                             continue
 
-                        # Prepare row data for CSV
-                        row_data = []
-                        for col in header_columns:
-                            value = cleaned_data.get(col)
-                            if isinstance(value, list) or isinstance(value, dict):
-                               try:
-                                   # Convert lists/dicts to JSON strings for CSV cell
-                                   row_data.append(json.dumps(value, default=str))
-                               except TypeError as json_err:
-                                   logger.error(f"JSON serialization error for key '{col}' in ticket {issue.key}: {json_err}. Storing as string.")
-                                   row_data.append(str(value)) # Fallback
-                            elif value is None:
-                                row_data.append('') # Use empty string for None
-                            else:
-                                row_data.append(str(value)) # Convert other types to string
-
-                        # Write row to CSV
+                        row_data = [str(cleaned_data.get(col, '')) if not isinstance(cleaned_data.get(col), (list, dict)) else json.dumps(cleaned_data.get(col), default=str) for col in header_columns]
                         csv_writer.writerow(row_data)
                         processed_count += 1
                         
                     except Exception as proc_err:
                          logger.error(f"Error processing and writing issue {issue.key} to CSV: {proc_err}", exc_info=True)
                          error_count += 1
+                
+                total_fetched_this_run += batch_issue_count
+                logger.info(f"Finished processing batch. Processed this batch: {batch_issue_count}. Total processed this run: {processed_count}. Errors this run: {error_count}")
 
-                # Log progress after processing each batch (no commit needed for CSV)
-                logger.info(f"Finished processing batch ending at {start_at + batch_issue_count - 1}. Processed: {processed_count}, Errors: {error_count}")
-
-                # Check if we have fetched all issues (or if loop should break)
-                if total_fetched_count >= total_available:
-                    logger.info("Fetched count meets or exceeds total available. Ending fetch.")
+                if total_fetched_this_run >= total_available_in_jira: # Check against actual Jira total
+                    logger.info(f"All available tickets from Jira ({total_available_in_jira}) have been fetched and processed.")
                     break
                 
-                # Move to the next batch
-                start_at += batch_issue_count
-                
-                # --- BREAK AFTER FIRST BATCH (Keep for now)--- 
-                logger.info(f"Limiting scrape to the first batch ({BATCH_SIZE} tickets). Stopping loop.")
-                break 
-                # --- END BREAK --- 
+                start_at += batch_issue_count # Correctly advance start_at by the number of issues actually processed in this batch
 
-        # File is automatically closed by `with open(...)`
-        # conn.close() # REMOVE
-        logger.info(f"Finished scraping initial batch. CSV file '{csv_path}' created/updated. Total Processed: {processed_count}, Total Fetched in batch: {total_fetched_count}, Total Available in Project: {total_available}, Errors: {error_count}")
+        logger.info(f"Jira scraping finished. Total tickets processed and written to CSV: {processed_count}. Total fetched from Jira in this run: {total_fetched_this_run}. Errors encountered: {error_count}.")
 
     except IOError as e:
         logger.error(f"Could not open or write to CSV file '{csv_path}': {e}")
-        return processed_count, total_available
+        return processed_count, total_available_in_jira
     except Exception as e:
         logger.error(f"Unexpected error during CSV scraping process: {e}", exc_info=True)
-        return processed_count, total_available
+        return processed_count, total_available_in_jira
         
-    return processed_count, total_available 
+    return processed_count, total_available_in_jira 

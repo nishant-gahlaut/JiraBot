@@ -26,7 +26,8 @@ from handlers.action_handler import (
     handle_proceed_to_ai_title_suggestion,
     handle_summarize_individual_duplicates_from_message,
     handle_refine_description_after_duplicates,
-    handle_cancel_creation_at_message_duplicates
+    handle_cancel_creation_at_message_duplicates,
+    handle_summarize_specific_duplicate_ticket
 )
 from handlers.my_tickets_handler import (
     handle_my_tickets_initial_action,
@@ -44,6 +45,9 @@ from handlers.message_handler import handle_message
 
 # Import Jira scraper functions
 from utils.jira_scraper import scrape_and_store_tickets
+
+# Import the ingestion pipeline runner
+from pipelines.ingestion_pipeline import run_ingestion_pipeline
 
 # Load environment variables from .env file
 load_dotenv()
@@ -198,6 +202,11 @@ def trigger_refine_description_duplicates(ack, body, client, logger):
 def trigger_cancel_creation_message_duplicates(ack, body, client, logger):
     handle_cancel_creation_at_message_duplicates(ack, body, client, logger)
 
+# Handler for new individual ticket summarization button
+@app.action("summarize_specific_duplicate_ticket")
+def trigger_summarize_specific_duplicate(ack, body, client, logger):
+    handle_summarize_specific_duplicate_ticket(ack, body, client, logger)
+
 # --- My Tickets Flow Action Listeners ---
 @app.action("my_tickets_action")
 def trigger_my_tickets_initial(ack, body, client):
@@ -263,11 +272,23 @@ if __name__ == "__main__":
         # Scrape Jira tickets from the specified project
         # project_key_to_scrape = os.environ.get("JIRA_PROJECT_KEY_TO_SCRAPE")
         # if project_key_to_scrape:
-        #     logger.info(f"Starting Jira scrape for project: {project_key_to_scrape}...")
-        #     scraped_count, total_available = scrape_and_store_tickets(project_key_to_scrape)
+        #     logger.info(f"Starting Jira scrape for project: {project_key_to_scrape} for up to 200 tickets...")
+        #     # Parameters: project_key, total_tickets_to_scrape, api_batch_size
+        #     scraped_count, total_available = scrape_and_store_tickets(
+        #         project_key=project_key_to_scrape, 
+        #         total_tickets_to_scrape=200, # Changed from 2000 to 200
+        #         api_batch_size=100
+        #     )
         #     logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
+
+        #     if scraped_count > 0:
+        #         logger.info("Proceeding to Pinecone ingestion pipeline...")
+        #         run_ingestion_pipeline() # Call the ingestion pipeline
+        #     else:
+        #         logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
+
         # else:
-        #     logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping on startup.")
+        #     logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping and Pinecone ingestion on startup.")
 
         logger.info("Starting Socket Mode Handler...")
         # Use SocketModeHandler for development/testing without exposing a public URL

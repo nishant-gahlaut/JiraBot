@@ -7,10 +7,12 @@ import os # Ensure os is imported
 # Import state store from utils
 # from state_manager import conversation_states # Old import
 from utils.state_manager import conversation_states # Corrected import
-from services.jira_service import create_jira_ticket # Import the Jira service function
-from services.genai_service import generate_jira_details # Ensure GenAI service is imported if not already for the new handler
+from services.jira_service import create_jira_ticket, fetch_jira_ticket_data # Added fetch_jira_ticket_data
+from services.genai_service import generate_jira_details # Corrected import
 from services.duplicate_detection_service import summarize_ticket_similarities # Ensure duplicate detection and summarizer are imported for new handlers
 from langchain.schema import Document # For reconstructing documents if needed by summarizer
+from services.summarize_service import summarize_jira_ticket # Added summarize_jira_ticket
+from utils.data_cleaner import prepare_ticket_data_for_summary # Added prepare_ticket_data_for_summary
 
 logger = logging.getLogger(__name__)
 
@@ -813,3 +815,123 @@ def handle_cancel_creation_at_message_duplicates(ack, body, client, logger):
         logger.error(f"Slack API error in handle_cancel_creation: {e.response['error']}")
     except Exception as e:
         logger.error(f"Unexpected error in handle_cancel_creation: {e}", exc_info=True) 
+
+def handle_summarize_specific_duplicate_ticket(ack, body, client, logger):
+    """Handles the action when a user clicks 'Summarize this ticket' for a specific duplicate."""
+    ack()
+    logger.info(f"handle_summarize_specific_duplicate_ticket: Action received: {body['actions'][0]['value']}")
+
+    try:
+        action_value = json.loads(body['actions'][0]['value'])
+        ticket_id_to_summarize = action_value.get("ticket_id_to_summarize")
+        thread_ts = action_value.get("thread_ts")
+        channel_id = action_value.get("channel_id")
+        user_id = action_value.get("user_id") # Included for potential future use, e.g., DMs
+        assistant_id = action_value.get("assistant_id")
+
+        if not all([ticket_id_to_summarize, thread_ts, channel_id]):
+            logger.error(f"Missing critical info in action_value: {action_value}")
+            # Optionally post an ephemeral message to the user
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=body["user"]["id"], # Post ephemeral to the clicking user
+                thread_ts=thread_ts,
+                text="Sorry, something went wrong while trying to summarize that ticket. Essential information was missing."
+            )
+            return
+
+        logger.info(f"Thread {thread_ts}: Attempting to summarize specific ticket: {ticket_id_to_summarize}")
+
+        if assistant_id:
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status=f"Summarizing {ticket_id_to_summarize}...")
+                logger.info(f"Thread {thread_ts}: Set status to 'Summarizing {ticket_id_to_summarize}...'" )
+            except Exception as e:
+                logger.error(f"Thread {thread_ts}: Error setting status for specific ticket summary: {e}")
+        
+        # 1. Fetch Jira Ticket Data
+        raw_jira_issue = fetch_jira_ticket_data(ticket_id_to_summarize)
+        if not raw_jira_issue:
+            logger.warning(f"Thread {thread_ts}: Could not fetch data for ticket {ticket_id_to_summarize}.")
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"Sorry, I couldn\'t fetch data for ticket *{ticket_id_to_summarize}*. It might not exist, or there was an API error."
+            )
+            return # Exit if fetch fails
+
+        # 2. Prepare Data for Summary
+        summary_relevant_data = None
+        if hasattr(raw_jira_issue, 'raw') and raw_jira_issue.raw:
+            summary_relevant_data = prepare_ticket_data_for_summary(raw_jira_issue.raw, ticket_id_to_summarize)
+        else:
+            logger.error(f"Thread {thread_ts}: Fetched Jira issue for {ticket_id_to_summarize} is missing .raw attribute or it is empty.")
+
+        if not summary_relevant_data:
+            logger.error(f"Thread {thread_ts}: Failed to prepare data for {ticket_id_to_summarize} for summarization.")
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"Sorry, there was an error processing the data for ticket *{ticket_id_to_summarize}* before summarization."
+            )
+            return # Exit if preparation fails
+
+        # 3. Summarize Ticket
+        summary_result = summarize_jira_ticket(summary_relevant_data)
+        if not summary_result:
+            logger.error(f"Thread {thread_ts}: Failed to generate summary for {ticket_id_to_summarize}.")
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"Sorry, an error occurred while trying to generate a summary for ticket *{ticket_id_to_summarize}*."
+            )
+            return # Exit if summarization fails
+
+        # 4. Post Summary
+        summary_text = (
+            f"Here is a summary for ticket *{ticket_id_to_summarize}* (requested by <@{user_id}>):\n\n"
+            f"*Status*: {summary_result.get('status', 'N/A')}\\n"
+            f"*Issue*: {summary_result.get('issue_summary', 'N/A')}\\n"
+            f"*Resolution/Next Steps*: {summary_result.get('resolution_summary', 'N/A')}"
+        )
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=summary_text
+        )
+        logger.info(f"Thread {thread_ts}: Posted summary for specific ticket {ticket_id_to_summarize}.")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from action value: {e}. Value: {body['actions'][0]['value']}")
+        # Post an ephemeral message if JSON parsing fails
+        if body.get("channel") and body.get("user"): # Ensure basic body structure
+             client.chat_postEphemeral(
+                channel=body["channel"]["id"],
+                user=body["user"]["id"],
+                thread_ts=body.get("message",{}).get("thread_ts") or body.get("container",{}).get("thread_ts"), # Try to get thread_ts
+                text="Sorry, there was a technical issue processing your request. Please try again."
+            )
+    except Exception as e:
+        logger.error(f"General error in handle_summarize_specific_duplicate_ticket: {e}", exc_info=True)
+        # Post a generic error message in the thread
+        action_value = body['actions'][0]['value']
+        # Try to parse to get channel and thread, otherwise it might not be available
+        try:
+            parsed_value = json.loads(action_value)
+            ch_id = parsed_value.get("channel_id")
+            th_ts = parsed_value.get("thread_ts")
+            if ch_id and th_ts:
+                 client.chat_postMessage(
+                    channel=ch_id,
+                    thread_ts=th_ts,
+                    text="An unexpected error occurred while trying to summarize the ticket. Please check the logs."
+                )
+        except: # If parsing also fails, log it and can't send to thread
+            logger.error(f"Could not parse action_value to send error message to thread. Value was: {action_value}")
+    finally:
+        if assistant_id and thread_ts: # Ensure thread_ts is available here too
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
+                logger.info(f"Thread {thread_ts}: Cleared status after specific ticket summary attempt.")
+            except Exception as se:
+                logger.error(f"Thread {thread_ts}: Error clearing status after specific ticket summary attempt: {se}") 
