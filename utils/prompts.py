@@ -21,3 +21,30 @@ Comments:
 
 Resolution/Next Steps Summary (1-2 sentences):
 """ 
+
+# Prompt for reranking retrieved tickets based on a query
+RERANK_DUPLICATE_TICKETS_PROMPT = """You are an assistant. Given the following user query and retrieved tickets,
+rank the tickets by relevance and return the top {top_n} ones.
+
+Query: {query}
+
+Tickets:
+{formatted_docs}
+
+Respond with only the most relevant {top_n} ticket numbers as a list (e.g., 1,3,5).
+If you think none are relevant or cannot determine, respond with an empty list or 'None'.
+"""
+
+# Prompt for summarizing similarities between a query and a list of tickets
+SUMMARIZE_TICKET_SIMILARITIES_PROMPT = """You are a technical assistant. Given a user query and a list of JIRA tickets,
+summarize how these tickets are related to the user query and to each other.
+Focus on highlighting the key similarities.
+
+User Query:
+{query}
+
+Tickets:
+{ticket_texts}
+
+Provide a detailed but concise summary.
+""" 

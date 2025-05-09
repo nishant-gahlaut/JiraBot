@@ -8,6 +8,9 @@ import os # Ensure os is imported
 # from state_manager import conversation_states # Old import
 from utils.state_manager import conversation_states # Corrected import
 from services.jira_service import create_jira_ticket # Import the Jira service function
+from services.genai_service import generate_jira_details # Ensure GenAI service is imported if not already for the new handler
+from services.duplicate_detection_service import summarize_ticket_similarities # Ensure duplicate detection and summarizer are imported for new handlers
+from langchain.schema import Document # For reconstructing documents if needed by summarizer
 
 logger = logging.getLogger(__name__)
 
@@ -575,41 +578,238 @@ def handle_modify_after_ai(ack, body, client, logger):
     # except Exception as e:
     #     logger.error(f"Error re-posting initial summary request for modification: {e}")
 
-def handle_summarize_ticket_action(ack, body, client, logger):
-    """Handles the 'Summarize Ticket' button click."""
-    ack() # Acknowledge the action immediately
-    logger.info("'Summarize Ticket' button clicked.")
-    user_id = body["user"]["id"]
-    channel_id = body["channel"]["id"]
-    thread_ts = body["message"]["thread_ts"] # Get thread_ts from the original message
-    assistant_id = body.get("assistant", {}).get("id") # Get assistant_id
+def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
+    """Handles the 'Proceed with this Description' button after duplicate check."""
+    ack()
+    logger.info("'Proceed with this Description' button clicked after duplicate check.")
+    assistant_id = None # Initialize assistant_id to ensure it has a value in finally if try block fails early
+    thread_ts = None # Initialize thread_ts for the same reason
 
-    # Set state
-    conversation_states[thread_ts] = {
-        "step": "awaiting_summary_input",
-        "user_id": user_id,
-        "channel_id": channel_id,
-        "assistant_id": assistant_id,
-        "data": {}
-    }
-    logger.info(f"Set state for thread {thread_ts} to 'awaiting_summary_input'")
-
-    # Ask for Ticket ID or URL
     try:
+        action_value = json.loads(body["actions"][0]["value"])
+        initial_description = action_value["initial_description"]
+        thread_ts = str(action_value["thread_ts"])
+        channel_id = str(action_value["channel_id"])
+        user_id = str(action_value["user_id"])
+        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
+
+        logger.info(f"Thread {thread_ts}: Proceeding with description: '{initial_description[:100]}...'" )
+
+        if assistant_id:
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="Generating suggestion...")
+                logger.info(f"Thread {thread_ts}: Set status to 'Generating suggestion...'" )
+            except Exception as e:
+                logger.error(f"Thread {thread_ts}: Error setting status before GenAI for initial title: {e}")
+
+        # Call GenAI to get *suggested title* based on user description
+        generated_details = generate_jira_details(initial_description)
+        suggested_title = generated_details.get("title", "Suggestion Error")
+        logger.info(f"Thread {thread_ts}: GenAI suggested title: '{suggested_title}'" )
+
+        # Store data and update state - THIS IS THE CRITICAL STATE UPDATE
+        # that message_handler.py used to do.
+        conversation_states[thread_ts] = {
+            "step": "awaiting_ai_confirmation",
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "assistant_id": assistant_id,
+            "data": {
+                "initial_description": initial_description,
+                "suggested_title": suggested_title
+            }
+        }
+        logger.info(f"Thread {thread_ts}: Updated state to 'awaiting_ai_confirmation' with data." )
+
+        # Prepare confirmation response with buttons (same as message_handler used to send)
+        ai_confirmation_blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Thanks! Based on your description, I suggest the following:\n\n*Suggested Title:* {suggested_title}\n\n*Your Description:*```{initial_description}```\n\nWould you like to proceed with these details or modify them?"
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "Continue", "emoji": True}, "style": "primary", "action_id": "continue_after_ai"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Modify", "emoji": True}, "action_id": "modify_after_ai"}
+                ]
+            }
+        ]
+
         client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
-            text="Okay, let's summarize a Jira ticket. Please provide the Ticket ID (e.g., PROJ-123) or the full Jira link."
+            blocks=ai_confirmation_blocks,
+            text=f"Suggested Title: {suggested_title}"
         )
-        if assistant_id:
-             # Optionally clear status if needed
-            client.assistant_threads_setStatus(
-                assistant_id=assistant_id,
-                thread_ts=thread_ts,
-                status=""
-            )
-        logger.info(f"Asked for Ticket ID/URL for summarization in thread {thread_ts}")
+        logger.info(f"Thread {thread_ts}: Posted AI title suggestion and Continue/Modify buttons." )
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_proceed_to_ai_title_suggestion: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_proceed_to_ai_title_suggestion: {e}")
     except SlackApiError as e:
-        logger.error(f"Slack API Error posting summarize ticket prompt: {e.response['error']}")
+        logger.error(f"Slack API error in handle_proceed_to_ai_title_suggestion: {e.response['error']}")
     except Exception as e:
-        logger.error(f"Error posting summarize ticket prompt: {e}") 
+        logger.error(f"Unexpected error in handle_proceed_to_ai_title_suggestion: {e}", exc_info=True)
+    finally:
+        if assistant_id and thread_ts: # Ensure thread_ts is also available
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
+                logger.info(f"Thread {thread_ts}: Cleared status after proceeding to AI title suggestion.")
+            except Exception as se:
+                logger.error(f"Thread {thread_ts}: Error clearing status: {se}")
+
+def handle_summarize_individual_duplicates_from_message(ack, body, client, logger):
+    """Handles 'Summarize Individual Tickets' from the duplicate check message."""
+    ack()
+    logger.info("'Summarize Individual Tickets' button clicked.")
+
+    try:
+        action_value = json.loads(body["actions"][0]["value"])
+        user_query = action_value["user_query"]
+        tickets_data = action_value["tickets_data"]
+        original_context = action_value["original_context"]
+
+        thread_ts = str(original_context["thread_ts"])
+        channel_id = str(original_context["channel_id"])
+        # user_id = str(original_context["user_id"])
+        assistant_id = str(original_context.get("assistant_id")) if original_context.get("assistant_id") else None
+
+        logger.info(f"Thread {thread_ts}: Summarizing {len(tickets_data)} individual tickets for query: '{user_query[:50]}...'" )
+
+        if not tickets_data:
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text="No specific tickets were provided to summarize.")
+            return
+
+        header_posted = False
+        for i, ticket_data_dict in enumerate(tickets_data):
+            if not header_posted:
+                 client.chat_postMessage(
+                    channel=channel_id, 
+                    thread_ts=thread_ts, 
+                    text=f"📝 Here are individual summaries for the top tickets based on your query: '{user_query[:50]}...'"
+                )
+                 header_posted = True
+
+            doc_to_summarize = Document(page_content=ticket_data_dict["page_content"], metadata=ticket_data_dict.get("metadata", {}))
+            ticket_id_display = ticket_data_dict.get("metadata", {}).get("ticket_id", f"Ticket {i+1}")
+            ticket_url_display = ticket_data_dict.get("metadata", {}).get("url")
+            
+            display_name = f"*{ticket_id_display}*"
+            if ticket_url_display:
+                display_name = f"*<{ticket_url_display}|{ticket_id_display}>*"
+
+            individual_summary = summarize_ticket_similarities(query=user_query, tickets=[doc_to_summarize])
+            
+            summary_blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": f"*Summary for {display_name}:*\n{individual_summary}"}},
+                {"type": "divider"}
+            ]
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, blocks=summary_blocks, text=f"Summary for {ticket_id_display}")
+            logger.info(f"Thread {thread_ts}: Posted individual summary for {ticket_id_display}." )
+
+        # After individual summaries, offer to continue or cancel
+        final_cta_blocks = [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "What would you like to do next?"}},
+            {
+                "type": "actions", 
+                "elements": [
+                    {
+                        "type": "button", 
+                        "text": {"type": "plain_text", "text": "Proceed with Original Description"}, 
+                        "style": "primary", 
+                        "action_id": "proceed_to_ai_title_suggestion", 
+                        "value": json.dumps(original_context) # Pass the original full context back
+                    },
+                    {
+                        "type": "button", 
+                        "text": {"type": "plain_text", "text": "Cancel Creation"}, 
+                        "style": "danger", 
+                        "action_id": "cancel_creation_at_message_duplicates",
+                        "value": json.dumps({"thread_ts": thread_ts})
+                    }
+                ]
+            }
+        ]
+        client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, blocks=final_cta_blocks, text="What would you like to do next?")
+        logger.info(f"Thread {thread_ts}: Posted final CTAs after individual summaries." )
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_summarize_individual: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_summarize_individual: {e}")
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_summarize_individual: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_summarize_individual: {e}", exc_info=True)
+
+def handle_refine_description_after_duplicates(ack, body, client, logger):
+    """Handles 'Refine My Description' button after duplicate check."""
+    ack()
+    logger.info("'Refine My Description' button clicked.")
+    try:
+        action_value = json.loads(body["actions"][0]["value"])
+        thread_ts = str(action_value["thread_ts"])
+        channel_id = str(action_value["channel_id"])
+        user_id = str(action_value["user_id"])
+        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
+
+        # Set state back to await the user's new description
+        conversation_states[thread_ts] = {
+            "step": "awaiting_initial_summary",
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "assistant_id": assistant_id,
+            "data": {} # Clear previous data for this flow
+        }
+        logger.info(f"Thread {thread_ts}: Set state back to 'awaiting_initial_summary' for refinement." )
+
+        client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="Okay, let's try again. Please provide your refined description for the Jira ticket:"
+        )
+        logger.info(f"Thread {thread_ts}: Prompted user for refined description." )
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_refine_description: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_refine_description: {e}")
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_refine_description: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_refine_description: {e}", exc_info=True)
+
+def handle_cancel_creation_at_message_duplicates(ack, body, client, logger):
+    """Handles 'Cancel Ticket Creation' from the duplicate check message step."""
+    ack()
+    logger.info("'Cancel Ticket Creation' button clicked at duplicate message step.")
+    try:
+        action_value = json.loads(body["actions"][0]["value"])
+        thread_ts = str(action_value["thread_ts"])
+        channel_id = body["channel"]["id"]
+        user_id = body["user"]["id"]
+
+        if thread_ts in conversation_states:
+            del conversation_states[thread_ts]
+            logger.info(f"Thread {thread_ts}: Cleared conversation state due to cancellation." )
+        
+        client.chat_postMessage(
+            channel=channel_id, # Post to the channel where button was clicked
+                thread_ts=thread_ts,
+            text=f"<@{user_id}>, the Jira ticket creation process has been cancelled."
+            )
+        logger.info(f"Thread {thread_ts}: Posted ticket creation cancellation message." )
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from button value in handle_cancel_creation: {e}")
+    except KeyError as e:
+        logger.error(f"Missing key in button value in handle_cancel_creation: {e}")
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_cancel_creation: {e.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_cancel_creation: {e}", exc_info=True) 

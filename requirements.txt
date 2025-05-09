@@ -3,3 +3,11 @@ python-dotenv
 google-generativeai
 jira
 requests 
+langchain
+pinecone==6.0.2
+langchain-cohere
+langchain-google-genai
+faiss-cpu
+
+# Consider adding cohere SDK if direct calls are made, though langchain-cohere might suffice
+# cohere

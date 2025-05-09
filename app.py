@@ -22,7 +22,11 @@ from handlers.action_handler import (
     handle_summarize_ticket_action,
     handle_create_ticket_submission,
     handle_continue_after_ai,
-    handle_modify_after_ai
+    handle_modify_after_ai,
+    handle_proceed_to_ai_title_suggestion,
+    handle_summarize_individual_duplicates_from_message,
+    handle_refine_description_after_duplicates,
+    handle_cancel_creation_at_message_duplicates
 )
 from handlers.my_tickets_handler import (
     handle_my_tickets_initial_action,
@@ -170,12 +174,29 @@ def trigger_summarize_ticket(ack, body, client):
 
 # Action listeners for AI confirmation buttons
 @app.action("continue_after_ai")
-def trigger_continue_after_ai(ack, body, client):
+def trigger_continue_after_ai(ack, body, client, logger):
     handle_continue_after_ai(ack, body, client, logger)
 
 @app.action("modify_after_ai")
-def trigger_modify_after_ai(ack, body, client):
+def trigger_modify_after_ai(ack, body, client, logger):
     handle_modify_after_ai(ack, body, client, logger)
+
+# --- New Action Listeners for Duplicate Detection Flow ---
+@app.action("proceed_to_ai_title_suggestion")
+def trigger_proceed_to_ai_title(ack, body, client, logger):
+    handle_proceed_to_ai_title_suggestion(ack, body, client, logger)
+
+@app.action("summarize_individual_duplicates_message_step")
+def trigger_summarize_individual_duplicates_msg_step(ack, body, client, logger):
+    handle_summarize_individual_duplicates_from_message(ack, body, client, logger)
+
+@app.action("refine_description_after_duplicates")
+def trigger_refine_description_duplicates(ack, body, client, logger):
+    handle_refine_description_after_duplicates(ack, body, client, logger)
+
+@app.action("cancel_creation_at_message_duplicates")
+def trigger_cancel_creation_message_duplicates(ack, body, client, logger):
+    handle_cancel_creation_at_message_duplicates(ack, body, client, logger)
 
 # --- My Tickets Flow Action Listeners ---
 @app.action("my_tickets_action")
