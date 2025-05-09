@@ -47,4 +47,15 @@ Tickets:
 {ticket_texts}
 
 Provide a detailed but concise summary.
-""" 
+"""
+
+# New prompt for summarizing a Slack conversation thread
+SUMMARIZE_SLACK_THREAD_PROMPT = """You are an expert assistant tasked with summarizing a Slack thread conversation. 
+The conversation history is provided below, with each message prefixed by the user who sent it. 
+Messages are ordered from oldest to newest.
+Provide a concise summary (2-3 sentences) of the main topics discussed and any potential action items or questions raised.
+
+Conversation History:
+{conversation_history}
+
+Concise Summary:""" 

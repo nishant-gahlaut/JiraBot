@@ -13,8 +13,9 @@ from services.genai_service import generate_jira_details
 from services.jira_service import extract_ticket_id_from_input, fetch_jira_ticket_data
 from services.summarize_service import summarize_jira_ticket
 from utils.data_cleaner import prepare_ticket_data_for_summary
-from services.duplicate_detection_service import find_and_summarize_duplicates # New import for duplicate detection
+# from services.duplicate_detection_service import find_and_summarize_duplicates # No longer directly used here
 from slack_sdk.errors import SlackApiError
+from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options # New Import
 
 logger = logging.getLogger(__name__)
 
@@ -37,150 +38,25 @@ def handle_message(message, client, context, logger):
             # --- Handle Initial Summary/Description Input (NEW Create Ticket Flow Start) ---
             if current_state and current_state.get("step") == "awaiting_initial_summary":
                 user_text = text # This is the initial description from the user
-                logger.info(f"Thread {thread_ts}: State is 'awaiting_initial_summary'. Processing description: '{user_text[:100]}...'" )
+                logger.info(f"Thread {thread_ts}: State is 'awaiting_initial_summary'. Processing description: '{user_text[:100]}...'")
 
                 original_user_id = str(current_state.get("user_id", user_id))
                 original_channel_id = str(current_state.get("channel_id", channel_id))
                 original_assistant_id = str(current_state.get("assistant_id", assistant_id)) if current_state.get("assistant_id") else (str(assistant_id) if assistant_id else None)
 
-                if original_assistant_id:
-                    try:
-                        client.assistant_threads_setStatus(assistant_id=original_assistant_id, thread_ts=thread_ts, status="Checking for similar tickets...")
-                        logger.info(f"Thread {thread_ts}: Set status to 'Checking for similar tickets...'" )
-                    except Exception as e:
-                        logger.error(f"Thread {thread_ts}: Error setting status before duplicate check: {e}")
-
-                logger.info(f"Thread {thread_ts}: Calling find_and_summarize_duplicates for query: '{user_text[:100]}...'" )
-                duplicate_results = find_and_summarize_duplicates(user_query=user_text)
-                
-                # DETAILED LOGGING ADDED HERE
-                logger.info(f"Thread {thread_ts}: Raw duplicate_results from service: {json.dumps(duplicate_results, default=str)}")
-                
-                top_tickets = duplicate_results.get("tickets", [])
-                overall_summary = duplicate_results.get("summary", "Could not generate an overall summary for similar tickets.")
-                
-                logger.info(f"Thread {thread_ts}: 'top_tickets' variable after .get(): {json.dumps(top_tickets, default=str)}")
-                logger.info(f"Thread {thread_ts}: Length of 'top_tickets' to be checked: {len(top_tickets)}")
-                # END OF DETAILED LOGGING
-                
-                logger.info(f"Thread {thread_ts}: Duplicate detection found {len(top_tickets)} potential matches." )
-
-                button_context_value = {
-                    "initial_description": user_text,
-                    "thread_ts": str(thread_ts),
-                    "channel_id": original_channel_id,
-                    "user_id": original_user_id,
-                    "assistant_id": original_assistant_id
-                }
-
-                blocks_for_duplicates = [
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"<@{original_user_id}>, thanks for the description. Before we proceed, I found some tickets that might be similar to your request:"
-                        }
-                    }
-                ]
-
-                if top_tickets:
-                    for i, ticket_dict in enumerate(top_tickets):
-                        current_metadata = ticket_dict.get('metadata', {})
-                        page_content = ticket_dict.get('page_content', '')
-
-                        ticket_id_meta = current_metadata.get('ticket_id', f'Similar Ticket {i+1}')
-                        ticket_url_meta = current_metadata.get('url')
-                        
-                        preview_text = page_content[:150].replace('\n', ' ') + "..."
-                        ticket_display_text = f"*{ticket_id_meta}*"
-                        if ticket_url_meta:
-                            ticket_display_text = f"*<{ticket_url_meta}|{ticket_id_meta}>*"
-                        
-                        blocks_for_duplicates.extend([
-                            {
-                                "type": "section",
-                                "text": {
-                                    "type": "mrkdwn",
-                                    "text": f"{ticket_display_text}\n*Preview:* {preview_text}"
-                                }
-                            },
-                            {
-                                "type": "actions",
-                                "elements": [
-                                    {
-                                        "type": "button",
-                                        "text": {"type": "plain_text", "text": "Summarize this ticket", "emoji": True},
-                                        "action_id": "summarize_specific_duplicate_ticket",
-                                        "value": json.dumps({
-                                            "ticket_id_to_summarize": ticket_id_meta,
-                                            "thread_ts": str(thread_ts),
-                                            "channel_id": original_channel_id,
-                                            "user_id": original_user_id,
-                                            "assistant_id": original_assistant_id
-                                        })
-                                    }
-                                ]
-                            },
-                            {"type": "divider"}
-                        ])
-                    if overall_summary:
-                        blocks_for_duplicates.append({
-                            "type": "section",
-                            "text": {"type": "mrkdwn", "text": f"""*Overall Similarity Summary:*\n{overall_summary}"""}
-                        })
-                else:
-                    blocks_for_duplicates.append({
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": "I didn't find any strong matches for existing tickets. You can proceed with creating a new one."}
-                    })
-
-                # Main action buttons - "Summarize Individual Tickets" is removed from here.
-                main_action_buttons = [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Proceed with this Description", "emoji": True},
-                        "style": "primary",
-                        "action_id": "proceed_to_ai_title_suggestion",
-                        "value": json.dumps(button_context_value)
-                    },
-                     {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Refine My Description", "emoji": True},
-                        "action_id": "refine_description_after_duplicates",
-                        "value": json.dumps(button_context_value)
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Cancel Creation", "emoji": True},
-                        "style": "danger",
-                        "action_id": "cancel_creation_at_message_duplicates",
-                        "value": json.dumps({"thread_ts": str(thread_ts)})
-                    }
-                ]
-                
-                blocks_for_duplicates.append({"type": "actions", "elements": main_action_buttons})
-
-                try:
-                    client.chat_postMessage(
-                        channel=original_channel_id,
-                        thread_ts=thread_ts,
-                        blocks=blocks_for_duplicates,
-                        text="Found potential duplicate tickets."
-                    )
-                    logger.info(f"Thread {thread_ts}: Posted duplicate ticket suggestions and actions." )
-                except Exception as e:
-                    logger.error(f"Thread {thread_ts}: Error posting duplicate ticket suggestions message: {e}")
-                finally:
-                    if original_assistant_id:
-                        try:
-                            client.assistant_threads_setStatus(assistant_id=original_assistant_id, thread_ts=thread_ts, status="")
-                            logger.info(f"Thread {thread_ts}: Cleared status after duplicate check." )
-                        except Exception as se:
-                            logger.error(f"Thread {thread_ts}: Error clearing status after duplicate check: {se}")
+                # Call the orchestrator
+                present_duplicate_check_and_options(
+                    client=client,
+                    channel_id=original_channel_id,
+                    thread_ts=thread_ts,
+                    user_id=original_user_id,
+                    initial_description=user_text,
+                    assistant_id=original_assistant_id
+                )
                 
                 if str(thread_ts) in conversation_states:
                     del conversation_states[str(thread_ts)]
-                    logger.info(f"Thread {thread_ts}: Cleared 'awaiting_initial_summary' state after posting duplicate info." )
+                    logger.info(f"Thread {thread_ts}: Cleared 'awaiting_initial_summary' state after calling orchestrator.")
 
             # --- Handle Ticket ID/URL Input (From Summarize Ticket Flow) ---
             elif current_state and current_state.get("step") == "awaiting_summary_input": # Make sure this is an elif or a separate if with a different state condition

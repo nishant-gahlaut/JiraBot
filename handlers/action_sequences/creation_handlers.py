@@ -206,62 +206,37 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             except Exception as se:
                 logger.error(f"Thread {thread_ts}: Error clearing status: {se}")
 
-def handle_refine_description_after_duplicates(ack, body, client, logger):
-    """Handles 'Refine My Description' button after duplicate check."""
-    ack()
-    logger.info("'Refine My Description' button clicked.")
-    try:
-        action_value = json.loads(body["actions"][0]["value"])
-        thread_ts = str(action_value["thread_ts"])
-        channel_id = str(action_value["channel_id"])
-        user_id = str(action_value["user_id"])
-        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
-
-        conversation_states[thread_ts] = {
-            "step": "awaiting_initial_summary",
-            "user_id": user_id,
-            "channel_id": channel_id,
-            "assistant_id": assistant_id,
-            "data": {}
-        }
-        logger.info(f"Thread {thread_ts}: Set state back to 'awaiting_initial_summary' for refinement.")
-
-        client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text="Okay, let's try again. Please provide your refined description for the Jira ticket:"
-        )
-        logger.info(f"Thread {thread_ts}: Prompted user for refined description.")
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from button value in handle_refine_description: {e}")
-    except KeyError as e:
-        logger.error(f"Missing key in button value in handle_refine_description: {e}")
-    except SlackApiError as e:
-        logger.error(f"Slack API error in handle_refine_description: {e.response['error']}")
-    except Exception as e:
-        logger.error(f"Unexpected error in handle_refine_description: {e}", exc_info=True)
-
 def handle_cancel_creation_at_message_duplicates(ack, body, client, logger):
     """Handles 'Cancel Ticket Creation' from the duplicate check message step."""
     ack()
     logger.info("'Cancel Ticket Creation' button clicked at duplicate message step.")
     try:
         action_value = json.loads(body["actions"][0]["value"])
-        thread_ts = str(action_value["thread_ts"])
-        channel_id = body["channel"]["id"]
-        user_id = body["user"]["id"]
+        thread_ts = str(action_value.get("thread_ts")) # Make .get robust
+        user_id = str(action_value.get("user_id"))
+        channel_id = str(action_value.get("channel_id"))
+        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None # from orchestrator
 
-        if thread_ts in conversation_states:
+        # Attempt to clear any active step for this thread
+        if thread_ts and thread_ts in conversation_states:
             del conversation_states[thread_ts]
-            logger.info(f"Thread {thread_ts}: Cleared conversation state due to cancellation.")
+            logger.info(f"Thread {thread_ts}: Cleared state due to cancellation at duplicate check.")
         
+        # Post a confirmation message
         client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
-            text=f"<@{user_id}>, the Jira ticket creation process has been cancelled."
-            )
-        logger.info(f"Thread {thread_ts}: Posted ticket creation cancellation message.")
+            text=f"<@{user_id}>, the ticket creation process has been cancelled."
+        )
+        logger.info(f"Thread {thread_ts}: Posted cancellation confirmation for user {user_id}.")
+
+        # Clear assistant status if applicable
+        if assistant_id and thread_ts:
+            try:
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
+                logger.info(f"Thread {thread_ts}: Cleared assistant status after cancellation.")
+            except Exception as e_status:
+                logger.error(f"Thread {thread_ts}: Error clearing assistant status after cancellation: {e_status}")
 
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON from button value in handle_cancel_creation: {e}")
