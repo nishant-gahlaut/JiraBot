@@ -58,4 +58,30 @@ Provide a concise summary (2-3 sentences) of the main topics discussed and any p
 Conversation History:
 {conversation_history}
 
-Concise Summary:""" 
+Concise Summary:"""
+
+# Prompt for generating a concise Jira ticket title from user description
+GENERATE_TICKET_TITLE_PROMPT = """You are an expert technical writer. Based on the following user description of an issue or request, 
+craft a clear, concise, and informative Jira ticket title. The title should be a single line and accurately reflect the core problem or task.
+
+User Description:
+'''{user_description}'''
+
+Jira Ticket Title:"""
+
+# Prompt for generating a refined Jira ticket description
+GENERATE_TICKET_DESCRIPTION_PROMPT = """You are an expert technical writer creating a Jira ticket description. 
+Based on the user's initial description, generate a refined and structured ticket description suitable for a Jira ticket.
+
+Follow these guidelines for the description:
+- Begin with a 2-3 line concise overview of the core issue or request.
+- If the user's input suggests multiple steps, tasks, or distinct points, present these as bullet points following the overview.
+- If relevant and inferable, you can subtly incorporate general context about common IT/software development environments, backend systems, or tech stacks to enhance clarity. Do not invent specific technical details not hinted at by the user.
+- Ensure the language is professional and clear for a development team.
+- Do NOT include any prefixed labels like 'Summary:', 'Overview:', 'Bullet Points:', or 'Details:' in your output. Provide only the refined description text itself.
+
+User's Initial Description:
+'''{user_description}'''
+
+Refined Jira Ticket Description (direct output):
+""" 

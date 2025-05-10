@@ -2,7 +2,7 @@ import logging
 import json
 from slack_sdk.errors import SlackApiError
 from utils.state_manager import conversation_states
-from services.genai_service import generate_jira_details
+from services.genai_service import generate_suggested_title, generate_refined_description
 from handlers.modals.interaction_handlers import build_create_ticket_modal
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ def handle_continue_after_ai(ack, body, client, logger):
              logger.error(f"Error posting ephemeral error message: {e}")
         return
 
-    initial_description = current_state["data"].get("initial_description", "")
+    ai_refined_description = current_state["data"].get("ai_refined_description", "")
     suggested_title = current_state["data"].get("suggested_title", "")
 
     metadata = {
@@ -72,9 +72,10 @@ def handle_continue_after_ai(ack, body, client, logger):
     }
 
     try:
+        logger.info(f"Modal pre-fill - Title: '{suggested_title}', Description: '{ai_refined_description}'")
         modal_view = build_create_ticket_modal(
             initial_summary=suggested_title,
-            initial_description=initial_description,
+            initial_description=ai_refined_description,
             private_metadata=json.dumps(metadata)
         )
         client.views_open(trigger_id=trigger_id, view=modal_view)
@@ -103,7 +104,7 @@ def handle_modify_after_ai(ack, body, client, logger):
              logger.error(f"Error posting ephemeral error message: {e}")
         return
 
-    initial_description = current_state["data"].get("initial_description", "")
+    ai_refined_description = current_state["data"].get("ai_refined_description", "")
     suggested_title = current_state["data"].get("suggested_title", "")
 
     metadata = {
@@ -113,9 +114,10 @@ def handle_modify_after_ai(ack, body, client, logger):
     }
 
     try:
+        logger.info(f"Modal pre-fill (modify) - Title: '{suggested_title}', Description: '{ai_refined_description}'")
         modal_view = build_create_ticket_modal(
             initial_summary=suggested_title,
-            initial_description=initial_description,
+            initial_description=ai_refined_description,
             private_metadata=json.dumps(metadata)
         )
         client.views_open(trigger_id=trigger_id, view=modal_view)
@@ -126,32 +128,37 @@ def handle_modify_after_ai(ack, body, client, logger):
         logger.error(f"Error opening create ticket modal for modification: {e}")
 
 def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
-    """Handles the 'Proceed with this Description' button after duplicate check."""
+    """Handles the 'Proceed with this Description' button after duplicate check. 
+       Now generates AI title AND AI refined description.
+    """
     ack()
-    logger.info("'Proceed with this Description' button clicked after duplicate check.")
+    logger.info("'Proceed with this Description' button clicked. Generating AI title and description.")
     assistant_id = None
     thread_ts = None
+    user_raw_initial_description = ""
 
     try:
         action_value = json.loads(body["actions"][0]["value"])
-        initial_description = action_value["initial_description"]
+        user_raw_initial_description = action_value["initial_description"]
         thread_ts = str(action_value["thread_ts"])
         channel_id = str(action_value["channel_id"])
         user_id = str(action_value["user_id"])
         assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
 
-        logger.info(f"Thread {thread_ts}: Proceeding with description: '{initial_description[:100]}...'")
+        logger.info(f"Thread {thread_ts}: Proceeding with user's raw description: '{user_raw_initial_description[:100]}...'")
 
         if assistant_id:
             try:
-                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="Generating suggestion...")
-                logger.info(f"Thread {thread_ts}: Set status to 'Generating suggestion...'")
+                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="Generating AI suggestions...")
+                logger.info(f"Thread {thread_ts}: Set status to 'Generating AI suggestions...'")
             except Exception as e:
-                logger.error(f"Thread {thread_ts}: Error setting status before GenAI for initial title: {e}")
+                logger.error(f"Thread {thread_ts}: Error setting status before GenAI: {e}")
 
-        generated_details = generate_jira_details(initial_description)
-        suggested_title = generated_details.get("title", "Suggestion Error")
+        suggested_title = generate_suggested_title(user_raw_initial_description)
         logger.info(f"Thread {thread_ts}: GenAI suggested title: '{suggested_title}'")
+
+        ai_refined_description = generate_refined_description(user_raw_initial_description)
+        logger.info(f"Thread {thread_ts}: GenAI refined description: '{ai_refined_description[:150]}...'")
 
         conversation_states[thread_ts] = {
             "step": "awaiting_ai_confirmation",
@@ -159,18 +166,23 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             "channel_id": channel_id,
             "assistant_id": assistant_id,
             "data": {
-                "initial_description": initial_description,
-                "suggested_title": suggested_title
+                "user_raw_initial_description": user_raw_initial_description,
+                "suggested_title": suggested_title,
+                "ai_refined_description": ai_refined_description
             }
         }
-        logger.info(f"Thread {thread_ts}: Updated state to 'awaiting_ai_confirmation' with data.")
+        logger.info(f"Thread {thread_ts}: Updated state to 'awaiting_ai_confirmation' with AI title and description.")
 
         ai_confirmation_blocks = [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"Thanks! Based on your description, I suggest the following:\\n\\n*Suggested Title:* {suggested_title}\\n\\n*Your Description:*```{initial_description}```\\n\\nWould you like to proceed with these details or modify them?"
+                    "text": (f"Thanks! Based on your input, I suggest the following details for the Jira ticket:\n\n"
+                             f"*Suggested Title:* {suggested_title}\n\n"
+                             f"*Suggested Description:*\n```{ai_refined_description}```\n\n"
+                             f"Would you like to proceed with these AI-generated details, or modify them further?"
+                            )
                 }
             },
             {
@@ -186,9 +198,9 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             channel=channel_id,
             thread_ts=thread_ts,
             blocks=ai_confirmation_blocks,
-            text=f"Suggested Title: {suggested_title}"
+            text=f"AI Suggested Title: {suggested_title}"
         )
-        logger.info(f"Thread {thread_ts}: Posted AI title suggestion and Continue/Modify buttons.")
+        logger.info(f"Thread {thread_ts}: Posted AI title and description suggestion with Continue/Modify buttons.")
 
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON from button value in handle_proceed_to_ai_title_suggestion: {e}")
@@ -202,7 +214,7 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
         if assistant_id and thread_ts:
             try:
                 client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
-                logger.info(f"Thread {thread_ts}: Cleared status after proceeding to AI title suggestion.")
+                logger.info(f"Thread {thread_ts}: Cleared status after AI suggestion step.")
             except Exception as se:
                 logger.error(f"Thread {thread_ts}: Error clearing status: {se}")
 

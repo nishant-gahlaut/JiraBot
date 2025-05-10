@@ -4,6 +4,9 @@ import logging
 import google.generativeai as genai # Import Google GenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+# Import prompts
+from utils.prompts import GENERATE_TICKET_TITLE_PROMPT, GENERATE_TICKET_DESCRIPTION_PROMPT
+
 logger = logging.getLogger(__name__)
 
 # Configure the GenAI client using API key from environment variables
@@ -130,3 +133,37 @@ def generate_jira_details(user_summary):
     #         "description": f"Could not generate details due to an API error: {e}"
     #     }
     # --- End Actual GenAI Logic --- 
+
+def generate_suggested_title(user_description: str) -> str:
+    """Generates a suggested Jira ticket title using an LLM."""
+    if not user_description or user_description.isspace():
+        logger.warning("User description is empty for title generation. Returning default.")
+        return "Title not generated (empty input)"
+
+    prompt = GENERATE_TICKET_TITLE_PROMPT.format(user_description=user_description)
+    logger.info(f"Generating suggested title for description: '{user_description[:100]}...'")
+    suggested_title = generate_text(prompt)
+    # Basic cleaning: LLM might sometimes include the label like "Jira Ticket Title:"
+    if "Jira Ticket Title:" in suggested_title:
+        suggested_title = suggested_title.split("Jira Ticket Title:", 1)[-1].strip()
+    if isinstance(suggested_title, str) and suggested_title.startswith("Error:"):
+        logger.error(f"Failed to generate title: {suggested_title}")
+        return "Could not generate title"
+    return suggested_title
+
+def generate_refined_description(user_description: str) -> str:
+    """Generates a refined Jira ticket description using an LLM."""
+    if not user_description or user_description.isspace():
+        logger.warning("User description is empty for description refinement. Returning default.")
+        return "Description not generated (empty input)"
+
+    prompt = GENERATE_TICKET_DESCRIPTION_PROMPT.format(user_description=user_description)
+    logger.info(f"Generating refined description for: '{user_description[:100]}...'")
+    refined_description = generate_text(prompt)
+    # Basic cleaning: LLM might sometimes include the label
+    if "Refined Jira Ticket Description:" in refined_description:
+        refined_description = refined_description.split("Refined Jira Ticket Description:", 1)[-1].strip()
+    if isinstance(refined_description, str) and refined_description.startswith("Error:"):
+        logger.error(f"Failed to generate refined description: {refined_description}")
+        return "Could not generate refined description. Original: " + user_description
+    return refined_description
