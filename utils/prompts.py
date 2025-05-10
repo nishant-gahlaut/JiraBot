@@ -84,4 +84,22 @@ User's Initial Description:
 '''{user_description}'''
 
 Refined Jira Ticket Description (direct output):
+"""
+
+# Prompt for generating all ticket components (summary, title, description) from a Slack thread
+GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT = """You are an expert AI assistant analyzing a Slack thread to help create a Jira ticket.
+Based on the following Slack thread conversation, provide three pieces of information:
+1.  A concise overall summary of the entire thread's discussion (2-4 sentences).
+2.  A suggested, concise Jira ticket title that captures the main actionable issue or request from the thread.
+3.  A refined and structured Jira ticket description. This description should start with a 2-3 line overview of the core issue/request identified from the thread, and if the thread implies multiple steps, tasks, or distinct points, list them as bullet points under the overview. If relevant, subtly incorporate general IT/software context if it enhances clarity, but do not invent specifics.
+
+Return these three items formatted as a single JSON object with the keys "thread_summary", "suggested_title", and "refined_description".
+Do NOT include any prefixed labels like 'Summary:', 'Title:', 'Description:' within the *values* of these JSON fields. The values should be the direct text for each component.
+
+Slack Thread Conversation:
+--- BEGIN THREAD ---
+{slack_thread_conversation}
+--- END THREAD ---
+
+JSON Output:
 """ 

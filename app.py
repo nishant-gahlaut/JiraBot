@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import logging
 from slack_sdk import WebClient
 import json
+from slack_sdk.errors import SlackApiError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -71,12 +72,14 @@ from handlers.action_sequences.summarization_handlers import (
 )
 
 # Import mention handler
-from handlers.mention_handler import handle_app_mention_event
+from handlers.mention_handler import handle_app_mention_event, fetch_conversation_context_for_mention, format_messages_for_summary, summarize_conversation
 
 # Import mention flow handlers
 from handlers.modals.interaction_handlers import build_create_ticket_modal
 from services.jira_service import create_jira_ticket
 from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options
+# Import AI title/description generators
+from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread
 
 # Load environment variables from .env file
 load_dotenv()
@@ -601,6 +604,144 @@ def handle_modal_submission(ack, body, client, view, logger):
     if private_metadata_str in conversation_states:
         del conversation_states[private_metadata_str]
         logger.info(f"Cleared state for modal key {private_metadata_str}")
+
+
+# Helper function to build a simple loading modal
+def build_loading_modal_view(message="Processing your request..."):
+    return {
+        "type": "modal",
+        "title": {"type": "plain_text", "text": "Jira Bot is Working..."},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": message},
+            }
+        ],
+    }
+
+# --- Message Shortcut Handler ---
+@app.shortcut("create_ticket_from_thread_message_action")
+def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
+    ack()  # Acknowledge immediately
+
+    trigger_id = shortcut["trigger_id"]
+    user_id_invoked = shortcut["user"]["id"]
+    channel_id = shortcut["channel"]["id"]
+    message_data = shortcut["message"]
+    original_message_ts = message_data["ts"]
+    thread_parent_ts = message_data.get("thread_ts", original_message_ts)
+    
+    # Initial view_id for the loading modal
+    view_id = None
+
+    try:
+        logger.info(f"'Create Ticket from Thread' shortcut: User {user_id_invoked} in channel {channel_id}, thread {thread_parent_ts}.")
+
+        # 1. Open a loading modal immediately
+        loading_view_response = client.views_open(
+            trigger_id=trigger_id,
+            view=build_loading_modal_view("🤖 Our AI is analyzing the thread and generating ticket details for you. This may take a few moments... ⏳")
+        )
+        view_id = loading_view_response["view"]["id"]
+        logger.info(f"Opened loading modal with view_id: {view_id}")
+
+        # 2. Fetch thread messages
+        logger.info(f"Fetching replies for thread: {thread_parent_ts} in channel {channel_id}")
+        all_thread_messages = []
+        cursor = None
+        while True:
+            result = client.conversations_replies(
+                channel=channel_id,
+                ts=thread_parent_ts,
+                limit=200,
+                cursor=cursor
+            )
+            all_thread_messages.extend(result.get('messages', []))
+            if not result.get('has_more'):
+                break
+            cursor = result.get('response_metadata', {}).get('next_cursor')
+        
+        logger.info(f"Fetched {len(all_thread_messages)} messages from thread {thread_parent_ts}.")
+
+        if not all_thread_messages:
+            logger.warning("No messages found in the thread.")
+            error_view = build_loading_modal_view("Could not find any messages in this thread to process.")
+            client.views_update(view_id=view_id, view=error_view)
+            return
+
+        formatted_conversation = format_messages_for_summary(all_thread_messages, client)
+        if not formatted_conversation:
+            logger.warning("Formatted conversation is empty.")
+            error_view = build_loading_modal_view("Could not format the conversation for summary.")
+            client.views_update(view_id=view_id, view=error_view)
+            return
+
+        # 3. Perform the single AI call to generate ticket components
+        logger.info(f"Generating ticket components from formatted conversation (first 200 chars): {formatted_conversation[:200]}...")
+        ticket_components = generate_ticket_components_from_thread(formatted_conversation)
+        
+        ai_title = ticket_components.get("suggested_title")
+        ai_description = ticket_components.get("refined_description")
+        # thread_summary = ticket_components.get("thread_summary") # Available if needed
+
+        if not ai_title or ai_title.startswith("Error:") or not ai_description or ai_description.startswith("Error:"):
+            error_message = "Sorry, I couldn't generate all ticket details from the thread."
+            detailed_error = f"AI generation failed. Title: '{ai_title}', Description: '{ai_description}'"
+            logger.error(detailed_error)
+            final_error_view = build_loading_modal_view(f"{error_message}. Please try again. ({detailed_error[:100]})")
+            client.views_update(view_id=view_id, view=final_error_view)
+            return
+
+        logger.info(f"AI Suggested Title: {ai_title}")
+        logger.info(f"AI Refined Description: {ai_description[:200]}...")
+        # if thread_summary and not thread_summary.startswith("Error:"):
+        #      logger.info(f"Thread Summary (for context/debugging): {thread_summary[:200]}...")
+
+        # 4. Build and Update Modal with the actual form
+        modal_private_metadata = {
+            "channel_id": channel_id,
+            "thread_ts": original_message_ts, 
+            "user_id": user_id_invoked,
+            "is_message_action": True 
+        }
+
+        final_modal_view = build_create_ticket_modal(
+            initial_summary=ai_title, #This is the title for the modal's title field
+            initial_description=ai_description,
+            private_metadata=json.dumps(modal_private_metadata)
+        )
+        
+        client.views_update(view_id=view_id, view=final_modal_view)
+        logger.info(f"Updated modal {view_id} with Jira creation form for user {user_id_invoked}.")
+
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_create_ticket_from_thread: {e.response['error']}", exc_info=True)
+        error_text = f"A Slack API error occurred: {e.response['error']}. Please try again."
+        if view_id: # If loading modal was opened, update it with error
+            try:
+                client.views_update(view_id=view_id, view=build_loading_modal_view(error_text))
+            except Exception as e_update:
+                 logger.error(f"Failed to update modal with Slack API error: {e_update}")
+        else: # If loading modal failed to open, try ephemeral message
+             try:
+                client.chat_postEphemeral(channel=channel_id, user=user_id_invoked, thread_ts=original_message_ts, text=error_text)
+             except Exception as e_ephemeral:
+                logger.error(f"Failed to send ephemeral error for Slack API error: {e_ephemeral}")
+
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_create_ticket_from_thread: {e}", exc_info=True)
+        error_text = "An unexpected error occurred while processing your request."
+        if view_id: # If loading modal was opened, update it
+            try:
+                client.views_update(view_id=view_id, view=build_loading_modal_view(error_text))
+            except Exception as e_update:
+                logger.error(f"Failed to update modal with general error: {e_update}")
+        else: # Fallback if view_id not set (e.g., error before views.open)
+            try:
+                if channel_id and user_id_invoked: # Check if we have these to post an ephemeral
+                    client.chat_postEphemeral(channel=channel_id, user=user_id_invoked, thread_ts=original_message_ts, text=error_text)
+            except Exception as e_ephemeral:
+                logger.error(f"Failed to send ephemeral error message: {e_ephemeral}")
 
 
 # --- Start the App ---

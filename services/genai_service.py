@@ -3,9 +3,10 @@ import os
 import logging
 import google.generativeai as genai # Import Google GenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
+import json
 
 # Import prompts
-from utils.prompts import GENERATE_TICKET_TITLE_PROMPT, GENERATE_TICKET_DESCRIPTION_PROMPT
+from utils.prompts import GENERATE_TICKET_TITLE_PROMPT, GENERATE_TICKET_DESCRIPTION_PROMPT, GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -167,3 +168,71 @@ def generate_refined_description(user_description: str) -> str:
         logger.error(f"Failed to generate refined description: {refined_description}")
         return "Could not generate refined description. Original: " + user_description
     return refined_description
+
+def generate_ticket_components_from_thread(slack_thread_conversation: str) -> dict:
+    """
+    Generates thread summary, suggested Jira title, and refined Jira description from a Slack thread
+    in a single LLM call, expecting a JSON output.
+    """
+    if not slack_thread_conversation or slack_thread_conversation.isspace():
+        logger.warning("Slack thread conversation is empty. Cannot generate ticket components.")
+        return {
+            "thread_summary": "Could not summarize: Empty thread input.",
+            "suggested_title": "Could not generate title: Empty thread input.",
+            "refined_description": "Could not generate description: Empty thread input."
+        }
+
+    prompt = GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT.format(slack_thread_conversation=slack_thread_conversation)
+    logger.info(f"Generating ticket components from thread: '{slack_thread_conversation[:200]}...'")
+    
+    raw_llm_output = generate_text(prompt)
+
+    if isinstance(raw_llm_output, str) and raw_llm_output.startswith("Error:"):
+        logger.error(f"LLM call failed for component generation: {raw_llm_output}")
+        return {
+            "thread_summary": f"Error during summarization: {raw_llm_output}",
+            "suggested_title": f"Error during title generation: {raw_llm_output}",
+            "refined_description": f"Error during description generation: {raw_llm_output}"
+        }
+    
+    try:
+        # The LLM output might be wrapped in ```json ... ``` or just be the JSON string.
+        # Basic cleaning for common markdown code block wrapper.
+        cleaned_output = raw_llm_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[len("```json"):].strip()
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[len("```"):].strip()
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-len("```")].strip()
+        
+        logger.debug(f"Cleaned LLM output for JSON parsing: {cleaned_output}")
+        components = json.loads(cleaned_output)
+        
+        # Validate expected keys
+        if not all(key in components for key in ["thread_summary", "suggested_title", "refined_description"]):
+            logger.error(f"LLM output parsed as JSON, but missing one or more required keys. Output: {components}")
+            missing_keys_message = "LLM output was missing some components."
+            return {
+                "thread_summary": components.get("thread_summary", missing_keys_message),
+                "suggested_title": components.get("suggested_title", missing_keys_message),
+                "refined_description": components.get("refined_description", missing_keys_message)
+            }
+        
+        logger.info("Successfully generated and parsed ticket components from thread.")
+        return components
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
+        return {
+            "thread_summary": "Error: Could not parse AI summary output.",
+            "suggested_title": "Error: Could not parse AI title output.",
+            "refined_description": "Error: Could not parse AI description output. Raw LLM output was: " + raw_llm_output[:200] + "..."
+        }
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during ticket component generation: {e}", exc_info=True)
+        return {
+            "thread_summary": f"Unexpected error: {e}",
+            "suggested_title": f"Unexpected error: {e}",
+            "refined_description": f"Unexpected error: {e}"
+        }
