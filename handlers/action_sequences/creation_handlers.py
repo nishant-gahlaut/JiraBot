@@ -65,18 +65,29 @@ def handle_continue_after_ai(ack, body, client, logger):
     ai_refined_description = current_state["data"].get("ai_refined_description", "")
     suggested_title = current_state["data"].get("suggested_title", "")
 
-    metadata = {
+    # This dictionary contains the context needed by handle_modal_submission
+    context_to_store = {
         "channel_id": channel_id,
         "thread_ts": thread_ts,
-        "user_id": user_id
+        "user_id": user_id,
+        # Include other details if needed by handle_modal_submission from this flow
+        # For example, if the original description or AI suggestions are needed later:
+        # "user_raw_initial_description": current_state["data"].get("user_raw_initial_description"),
+        # "suggested_title_at_modal_open": suggested_title,
+        # "ai_refined_description_at_modal_open": ai_refined_description
     }
+    private_metadata_key_str = json.dumps(context_to_store)
+
+    # Store this context in conversation_states using its JSON string as the key
+    conversation_states[private_metadata_key_str] = context_to_store
+    logger.info(f"Thread {thread_ts}: Stored modal context in conversation_states with key: {private_metadata_key_str}")
 
     try:
         logger.info(f"Modal pre-fill - Title: '{suggested_title}', Description: '{ai_refined_description}'")
         modal_view = build_create_ticket_modal(
             initial_summary=suggested_title,
             initial_description=ai_refined_description,
-            private_metadata=json.dumps(metadata)
+            private_metadata=private_metadata_key_str # Pass the string key
         )
         client.views_open(trigger_id=trigger_id, view=modal_view)
         logger.info(f"Opened create ticket modal for user {user_id} after AI confirmation (thread {thread_ts})")
@@ -107,18 +118,25 @@ def handle_modify_after_ai(ack, body, client, logger):
     ai_refined_description = current_state["data"].get("ai_refined_description", "")
     suggested_title = current_state["data"].get("suggested_title", "")
 
-    metadata = {
+    # This dictionary contains the context needed by handle_modal_submission
+    context_to_store = {
         "channel_id": channel_id,
         "thread_ts": thread_ts,
         "user_id": user_id
+        # Add other fields as in handle_continue_after_ai if necessary
     }
+    private_metadata_key_str = json.dumps(context_to_store)
+
+    # Store this context in conversation_states using its JSON string as the key
+    conversation_states[private_metadata_key_str] = context_to_store
+    logger.info(f"Thread {thread_ts}: Stored modal context (for modify) in conversation_states with key: {private_metadata_key_str}")
 
     try:
         logger.info(f"Modal pre-fill (modify) - Title: '{suggested_title}', Description: '{ai_refined_description}'")
         modal_view = build_create_ticket_modal(
             initial_summary=suggested_title,
             initial_description=ai_refined_description,
-            private_metadata=json.dumps(metadata)
+            private_metadata=private_metadata_key_str # Pass the string key
         )
         client.views_open(trigger_id=trigger_id, view=modal_view)
         logger.info(f"Opened create ticket modal for user {user_id} for modification (thread {thread_ts})")

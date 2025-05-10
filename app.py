@@ -281,9 +281,10 @@ def trigger_my_tickets_status_closed(ack, body, client):
     handle_my_tickets_status_selection(ack, body, client, logger, status_value="Closed")
 
 # Listener for modal submission
-@app.view("create_ticket_modal_submission")
-def handle_view_submission(ack, body, client, logger):
-    handle_create_ticket_submission(ack, body, client, logger)
+# Commenting out the old generic handler, as we want the specific one below to handle this view_id
+# @app.view("create_ticket_modal_submission") 
+# def handle_view_submission(ack, body, client, logger):
+#     handle_create_ticket_submission(ack, body, client, logger)
 
 
 # Listen for context changes (Optional)
@@ -519,92 +520,176 @@ Summary I used for search:
 
 
 # --- View Handlers ---
-@app.view("create_ticket_modal")
+@app.view("create_ticket_modal_submission") # Changed from "create_ticket_modal" to match the modal's callback_id
 def handle_modal_submission(ack, body, client, view, logger):
-    # This is the generic modal submission handler. It needs to be robust.
-    # The private_metadata should guide which flow this submission belongs to.
     private_metadata_str = view.get("private_metadata")
-    logger.info(f"Modal submitted. Private metadata: {private_metadata_str}")
+    logger.info(f"Modal submitted with view_id 'create_ticket_modal_submission'. Private metadata: {private_metadata_str}") # Updated log message
 
-    # Default values in case metadata parsing fails or state is missing
-    user_id = body["user"]["id"] # User who submitted the modal
-    # channel_id/thread_ts for posting back might not be in basic modal body, rely on state
-    
+    user_id = body["user"]["id"]
     state_data = conversation_states.get(private_metadata_str)
 
     if not state_data:
         ack_text = "Error: Couldn't find context for this submission. Please try starting over."
         logger.error(f"No state found for private_metadata_key: {private_metadata_str} in modal submission.")
-        ack(response_action="errors", errors={"title": ack_text}) # Or a more specific field
-        # Optionally post an ephemeral message to the user if possible, though channel/thread unknown here.
+        ack(response_action="errors", errors={"title_input_block": ack_text}) # Error on a specific field
         return
 
-    # Extract necessary info from state_data
     submission_channel_id = state_data.get("channel_id")
     submission_thread_ts = state_data.get("thread_ts")
-    # initial_description = state_data.get("initial_description") # This might be the summary from mention flow
-    # or description from direct creation flow. The modal has the final description.
     
-    # Extract values from the modal submission
     submitted_values = view["state"]["values"]
-    jira_title = submitted_values["title_input_block"]["title_input_action"]["value"]
-    jira_description = submitted_values["description_input_block"]["description_input_action"]["value"]
-    # Optional: project_id, issue_type_id if they were in the modal
+    # Corrected keys according to modal definition in interaction_handlers.py
+    jira_title = submitted_values["summary_block"]["summary_input"]["value"]
+    jira_description = submitted_values["description_block"]["description_input"]["value"]
+
+    # Extract other fields from the modal submission
+    # The actual keys will depend on the block_id and action_id in build_create_ticket_modal
+    selected_issue_type = submitted_values.get("issue_type_block", {}).get("issue_type_select", {}).get("selected_option", {}).get("value")
+    selected_priority = submitted_values.get("priority_block", {}).get("priority_select", {}).get("selected_option", {}).get("value")
+    selected_assignee_id = submitted_values.get("assignee_block", {}).get("assignee_select", {}).get("selected_user")
+    selected_labels_data = submitted_values.get("label_block", {}).get("label_select", {}).get("selected_options", [])
+    selected_labels = [opt["value"] for opt in selected_labels_data] if selected_labels_data else []
+    
+    # Optional fields from the modal (single static_select)
+    team_option = submitted_values.get("team_block", {}).get("team_select", {}).get("selected_option")
+    selected_team = team_option.get("value") if team_option else None
+
+    brand_option = submitted_values.get("brand_block", {}).get("brand_select", {}).get("selected_option")
+    selected_brand = brand_option.get("value") if brand_option else None
+
+    environment_option = submitted_values.get("environment_block", {}).get("environment_select", {}).get("selected_option")
+    selected_environment = environment_option.get("value") if environment_option else None
+
+    product_option = submitted_values.get("product_block", {}).get("product_select", {}).get("selected_option")
+    selected_product = product_option.get("value") if product_option else None
+
+    # Optional fields from the modal (multi static_select) - these are already robust
+    selected_task_types_data = submitted_values.get("task_type_block", {}).get("task_type_select", {}).get("selected_options", [])
+    selected_task_types = [opt["value"] for opt in selected_task_types_data] if selected_task_types_data else []
+    selected_root_causes_data = submitted_values.get("root_cause_block", {}).get("root_cause_select", {}).get("selected_options", [])
+    selected_root_causes = [opt["value"] for opt in selected_root_causes_data] if selected_root_causes_data else []
+
 
     logger.info(f"Modal submission by {user_id} for state key {private_metadata_str}: Title='{jira_title}', Desc='{jira_description[:50]}...'")
+    logger.info(f"Modal values - Issue Type: {selected_issue_type}, Prio: {selected_priority}, Assignee: {selected_assignee_id}, Labels: {selected_labels}")
+    logger.info(f"Modal optional - Team: {selected_team}, Brand: {selected_brand}, Env: {selected_environment}, Product: {selected_product}, TaskTypes: {selected_task_types}, RootCauses: {selected_root_causes}")
 
-    # Handle the actual Jira ticket creation
     ack() # Acknowledge the view submission immediately
 
+    project_key_from_env = os.environ.get("TICKET_CREATION_PROJECT_ID", "PROJ")
+    # Use the issue type selected in the modal, or fallback to a default
+    issue_type_to_create = selected_issue_type if selected_issue_type else "Task"
+
+    ticket_payload_data = {
+        "summary": jira_title,
+        "description": jira_description,
+        "project_key": project_key_from_env, 
+        "issue_type": issue_type_to_create,
+        "priority": selected_priority, # Pass priority from modal
+        "assignee_id": selected_assignee_id, # Pass assignee from modal (needs mapping in Jira service)
+        "labels": selected_labels, # Pass labels from modal
+        # Pass other optional fields to ticket_data for build_jira_payload_fields
+        "team": selected_team,
+        "brand": selected_brand,
+        "environment": selected_environment,
+        "product": selected_product,
+        "task_types": selected_task_types,
+        "root_causes": selected_root_causes
+    }
+    
+    confirmation_blocks = None
+    fallback_text = ""
+
     try:
-        # Call your existing Jira creation service
-        # Assuming create_jira_ticket takes title and description
-        # You might need project and issue type if your modal collects them
-        # For now, using hardcoded project/issue type as an example, replace with modal values if available
-        project_key = "PROJECT_KEY_PLACEHOLDER" # Replace with actual or from modal
-        issue_type_name = "Task" # Replace with actual or from modal
+        created_ticket_info = create_jira_ticket(ticket_payload_data)
 
-        created_ticket_info = create_jira_ticket(
-            summary=jira_title, 
-            description=jira_description,
-            project_key=project_key, # TODO: Get from modal or config
-            issue_type_name=issue_type_name # TODO: Get from modal or config
-        )
+        # ===== BEGIN DETAILED LOGGING =====
+        logger.info(f"Jira service call returned: {json.dumps(created_ticket_info, indent=2) if created_ticket_info else 'None'}")
+        # ===== END DETAILED LOGGING =====
 
-        if created_ticket_info and "key" in created_ticket_info and "url" in created_ticket_info:
-            ticket_key = created_ticket_info["key"]
-            ticket_url = created_ticket_info["url"]
-            confirmation_message = f"✅ Great! I've created Jira ticket <{ticket_url}|{ticket_key}> for you: *{jira_title}*"
-            logger.info(f"Successfully created Jira ticket {ticket_key} from modal submission.")
+        if created_ticket_info and created_ticket_info.get("key"):
+            key = created_ticket_info["key"]
+            url = created_ticket_info["url"]
+            title = created_ticket_info.get("title", jira_title) # Use title from response, fallback to submitted
+            status = created_ticket_info.get("status_name", "N/A")
+            issue_type = created_ticket_info.get("issue_type_name", issue_type_to_create)
+            assignee = created_ticket_info.get("assignee_name", "Unassigned")
+            priority = created_ticket_info.get("priority_name", selected_priority)
+
+            type_emoji = get_issue_type_emoji(issue_type)
+            priority_emoji = get_priority_emoji(priority)
+
+            logger.info(f"Successfully created Jira ticket {key} with details: Status='{status}', Type='{issue_type}', Assignee='{assignee}', Priority='{priority}'")
+
+            fallback_text = f"Ticket {key} created: {title}"
+            confirmation_blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"<@{user_id}> created a {issue_type} using Jira Bot"
+                    }
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*<{url}|{key} {title}>*"
+                    }
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"Status: *{status}*"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"{type_emoji} Type: *{issue_type}*"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"👤 Assignee: *{assignee}*"
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"{priority_emoji} Priority: *{priority}*"
+                        }
+                    ]
+                }
+            ]
         else:
-            confirmation_message = "⚠️ I tried to create the Jira ticket, but something went wrong. I didn't get the ticket details back."
             logger.error(f"Failed to create Jira ticket or parse response. create_jira_ticket response: {created_ticket_info}")
+            fallback_text = "⚠️ I tried to create the Jira ticket, but something went wrong. I didn't get all the ticket details back."
+            confirmation_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}]
 
     except Exception as e:
-        logger.error(f"Error creating Jira ticket from modal: {e}", exc_info=True)
-        confirmation_message = f"❌ Sorry, there was an error creating the Jira ticket: {e}"
+        logger.error(f"Error creating Jira ticket from modal or building confirmation: {e}", exc_info=True)
+        fallback_text = f"❌ Sorry, there was an error creating the Jira ticket: {str(e)}"
+        confirmation_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}]
 
-    # Post confirmation to the original thread/channel
-    if submission_channel_id: # Should always be present if state_data was found
+    if submission_channel_id:
         try:
+            # ===== BEGIN DETAILED LOGGING FOR MESSAGE PAYLOAD =====
+            logger.info(f"Attempting to post to channel {submission_channel_id}, thread {submission_thread_ts}")
+            logger.info(f"Fallback text to be sent: {fallback_text}")
+            logger.info(f"Blocks to be sent: {json.dumps(confirmation_blocks, indent=2) if confirmation_blocks else 'None'}")
+            # ===== END DETAILED LOGGING FOR MESSAGE PAYLOAD =====
             client.chat_postMessage(
                 channel=submission_channel_id,
-                thread_ts=submission_thread_ts, # Post in thread if available
-                text=confirmation_message
+                thread_ts=submission_thread_ts,
+                blocks=confirmation_blocks,
+                text=fallback_text # Fallback text for notifications
             )
         except Exception as e_post:
             logger.error(f"Failed to post ticket creation confirmation: {e_post}")
-    else: # Should not happen if state is managed correctly
+    else:
         logger.error("submission_channel_id missing in state_data, cannot post confirmation.")
-        # Fallback: maybe an ephemeral message to the user if user_id is known and channel_id is not
-        # client.chat_postEphemeral(user=user_id, channel=SOME_FALLBACK_CHANNEL, text=confirmation_message)
 
-
-    # Clean up state for this modal interaction
     if private_metadata_str in conversation_states:
         del conversation_states[private_metadata_str]
         logger.info(f"Cleared state for modal key {private_metadata_str}")
-
 
 # Helper function to build a simple loading modal
 def build_loading_modal_view(message="Processing your request..."):
@@ -698,17 +783,25 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
         #      logger.info(f"Thread Summary (for context/debugging): {thread_summary[:200]}...")
 
         # 4. Build and Update Modal with the actual form
-        modal_private_metadata = {
+        # This dictionary itself contains the data we need to retrieve later.
+        # The key to store it under will be its JSON string representation.
+        context_to_store = {
             "channel_id": channel_id,
             "thread_ts": original_message_ts, 
             "user_id": user_id_invoked,
             "is_message_action": True 
+            # Add any other data that handle_modal_submission might need from this specific flow
         }
+        private_metadata_key_str = json.dumps(context_to_store)
+
+        # Store the context in conversation_states using the string key
+        conversation_states[private_metadata_key_str] = context_to_store
+        logger.info(f"Stored context in conversation_states with key: {private_metadata_key_str}")
 
         final_modal_view = build_create_ticket_modal(
-            initial_summary=ai_title, #This is the title for the modal's title field
+            initial_summary=ai_title, 
             initial_description=ai_description,
-            private_metadata=json.dumps(modal_private_metadata)
+            private_metadata=private_metadata_key_str # Pass the string key to the modal
         )
         
         client.views_update(view_id=view_id, view=final_modal_view)
@@ -743,6 +836,43 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
             except Exception as e_ephemeral:
                 logger.error(f"Failed to send ephemeral error message: {e_ephemeral}")
 
+
+# --- Helper functions for rich ticket display ---
+def get_issue_type_emoji(issue_type_name: str) -> str:
+    """Returns an emoji for a given Jira issue type name."""
+    name_lower = issue_type_name.lower()
+    if "bug" in name_lower:
+        return "🐞"  # Bug
+    elif "task" in name_lower:
+        return "✅"  # Task
+    elif "story" in name_lower or "user story" in name_lower:
+        return "📖"  # Story
+    elif "epic" in name_lower:
+        return "⛰️"  # Epic
+    elif "improvement" in name_lower:
+        return "💡"  # Improvement
+    elif "sub-task" in name_lower or "subtask" in name_lower:
+        return "🔹" # Sub-task
+    elif "new feature" in name_lower:
+        return "✨" # New Feature
+    else:
+        return "📄"  # Default for other types
+
+def get_priority_emoji(priority_name: str) -> str:
+    """Returns an emoji for a given Jira priority name."""
+    name_lower = priority_name.lower()
+    if "highest" in name_lower or "critical" in name_lower or "p0" in name_lower:
+        return "🔥🔥"
+    elif "high" in name_lower or "p1" in name_lower:
+        return "⬆️"
+    elif "medium" in name_lower or "p2" in name_lower:
+        return "🟧" # Using an orange square as an example, Slack might render differently
+    elif "low" in name_lower or "p3" in name_lower:
+        return "⬇️"
+    elif "lowest" in name_lower or "p4" in name_lower:
+        return "📉"
+    else:
+        return "⚪" # Default
 
 # --- Start the App ---
 if __name__ == "__main__":

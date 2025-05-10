@@ -154,7 +154,7 @@ def fetch_my_jira_tickets(assignee_id, period, status):
 
 def create_jira_ticket(ticket_data):
     """
-    Creates a Jira ticket using the Jira REST API.
+    Creates a Jira ticket using the Jira REST API and fetches its details.
 
     Args:
         ticket_data (dict): A dictionary containing the ticket details, including:
@@ -171,25 +171,26 @@ def create_jira_ticket(ticket_data):
             # Add other fields from ticket_data as needed for Jira payload
 
     Returns:
-        dict: A dictionary with "key", "id", and "url" of the created ticket on success.
-        None: On failure.
+        dict: A dictionary with "key", "id", "url", "title", "status_name", 
+              "issue_type_name", "assignee_name", "priority_name" of the created ticket on success.
+        None: On failure to create or critical failure to fetch details.
     """
-    jira_base_url = os.environ.get("JIRA_BASE_URL") # e.g., https://your-domain.atlassian.net
-    jira_user_email = os.environ.get("JIRA_USER_EMAIL")
+    jira_base_url = os.environ.get("JIRA_BASE_URL") # Reverted to JIRA_BASE_URL
+    jira_user_email = os.environ.get("JIRA_USER_EMAIL") # Reverted to JIRA_USER_EMAIL
     jira_api_token = os.environ.get("JIRA_API_TOKEN")
 
     if not all([jira_base_url, jira_user_email, jira_api_token]):
-        logger.error("Jira API credentials (JIRA_BASE_URL, JIRA_USER_EMAIL, JIRA_API_TOKEN) are not fully configured.")
+        logger.error("Jira API credentials (JIRA_BASE_URL, JIRA_USER_EMAIL, JIRA_API_TOKEN) are not fully configured.") # Updated log message
         return None
 
-    api_url = f"{jira_base_url.rstrip('/')}/rest/api/3/issue"
+    # Endpoint for creating an issue
+    create_api_url = f"{jira_base_url.rstrip('/')}/rest/api/3/issue"
 
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
 
-    # Construct the payload using the new mapper
     payload_fields = build_jira_payload_fields(ticket_data)
     if not payload_fields:
         logger.error("Failed to build Jira payload fields from ticket_data.")
@@ -197,26 +198,29 @@ def create_jira_ticket(ticket_data):
 
     jira_payload = {"fields": payload_fields}
 
-    logger.debug(f"Jira API URL: {api_url}")
-    logger.debug(f"Jira API Payload: {json.dumps(jira_payload, indent=2)}")
+    logger.debug(f"Jira Create API URL: {create_api_url}")
+    logger.debug(f"Jira Create API Payload: {json.dumps(jira_payload, indent=2)}")
+
+    created_ticket_key = None
+    created_ticket_id = None
+    created_ticket_url = None
+    created_ticket_summary = payload_fields.get("summary", "Summary not provided in payload") # Get summary from input
 
     try:
+        # 1. Create the ticket
         response = requests.post(
-            api_url,
+            create_api_url,
             data=json.dumps(jira_payload),
             headers=headers,
             auth=(jira_user_email, jira_api_token),
-            timeout=30  # 30 seconds timeout
+            timeout=30
         )
-        response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
-
-        response_data = response.json()
-        logger.info(f"Successfully created Jira ticket: {response_data.get('key')}")
-        return {
-            "id": response_data.get("id"),
-            "key": response_data.get("key"),
-            "url": f"{jira_base_url.rstrip('/')}/browse/{response_data.get('key')}"
-        }
+        response.raise_for_status()
+        creation_response_data = response.json()
+        created_ticket_key = creation_response_data.get("key")
+        created_ticket_id = creation_response_data.get("id")
+        created_ticket_url = f"{jira_base_url.rstrip('/')}/browse/{created_ticket_key}"
+        logger.info(f"Successfully initiated creation of Jira ticket: {created_ticket_key}")
 
     except requests.exceptions.HTTPError as e:
         logger.error(f"HTTP error creating Jira ticket: {e.response.status_code} - {e.response.text}")
@@ -226,13 +230,78 @@ def create_jira_ticket(ticket_data):
             logger.error(f"Jira errors: {error_details.get('errors')}")
         except ValueError: # If response is not JSON
             logger.error("Jira error response was not in JSON format.")
-        return None
+        return None # Failed to create
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error creating Jira ticket: {e}")
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred while creating Jira ticket: {e}")
+        logger.error(f"An unexpected error occurred during Jira ticket creation: {e}")
         return None
+
+    if not created_ticket_key:
+        logger.error("Ticket creation seemed to succeed but no key was returned.")
+        return None
+
+    # 2. Fetch the newly created ticket to get all details
+    try:
+        get_issue_url = f"{jira_base_url.rstrip('/')}/rest/api/3/issue/{created_ticket_key}"
+        logger.info(f"Fetching details for newly created ticket: {created_ticket_key} from {get_issue_url}")
+        
+        get_response = requests.get(
+            get_issue_url,
+            headers=headers,
+            auth=(jira_user_email, jira_api_token),
+            timeout=30
+        )
+        get_response.raise_for_status()
+        fetched_issue_data = get_response.json()
+        
+        fields = fetched_issue_data.get("fields", {})
+        status_name = fields.get("status", {}).get("name", "N/A")
+        issue_type_name = fields.get("issuetype", {}).get("name", "N/A")
+        assignee_data = fields.get("assignee")
+        assignee_name = assignee_data.get("displayName", "Unassigned") if assignee_data else "Unassigned"
+        priority_data = fields.get("priority")
+        priority_name = priority_data.get("name", "N/A") if priority_data else "N/A"
+        # The summary should be what we sent, but we can confirm from 'fields'
+        # title = fields.get("summary", created_ticket_summary) 
+        # For consistency, let's use the summary from the input payload, as it's what the user saw/confirmed.
+        title = created_ticket_summary
+
+        logger.info(f"Successfully fetched details for ticket {created_ticket_key}: Status='{status_name}', Type='{issue_type_name}', Assignee='{assignee_name}', Priority='{priority_name}'")
+
+        return {
+            "id": created_ticket_id,
+            "key": created_ticket_key,
+            "url": created_ticket_url,
+            "title": title,
+            "status_name": status_name,
+            "issue_type_name": issue_type_name,
+            "assignee_name": assignee_name,
+            "priority_name": priority_name
+        }
+
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP error fetching details for ticket {created_ticket_key}: {e.response.status_code} - {e.response.text}")
+        # Fallback: return basic info if detail fetch fails but creation succeeded
+        return {
+            "id": created_ticket_id,
+            "key": created_ticket_key,
+            "url": created_ticket_url,
+            "title": created_ticket_summary, # Use summary from payload
+            "status_name": "N/A",
+            "issue_type_name": "N/A", # Or perhaps from initial ticket_data if available
+            "assignee_name": "N/A",
+            "priority_name": "N/A"
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error fetching details for ticket {created_ticket_key}: {e}")
+        # Fallback as above
+        return { "id": created_ticket_id, "key": created_ticket_key, "url": created_ticket_url, "title": created_ticket_summary, "status_name": "N/A", "issue_type_name": "N/A", "assignee_name": "N/A", "priority_name": "N/A"}
+    except Exception as e:
+        logger.error(f"Unexpected error fetching details for ticket {created_ticket_key}: {e}")
+        # Fallback as above
+        return { "id": created_ticket_id, "key": created_ticket_key, "url": created_ticket_url, "title": created_ticket_summary, "status_name": "N/A", "issue_type_name": "N/A", "assignee_name": "N/A", "priority_name": "N/A"}
 
 # Ensure to add calls to this function from your action_handler.py
 # Example (in action_handler.py, inside handle_create_ticket_submission):
