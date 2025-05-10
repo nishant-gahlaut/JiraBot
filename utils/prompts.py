@@ -102,4 +102,21 @@ Slack Thread Conversation:
 --- END THREAD ---
 
 JSON Output:
+"""
+
+# Prompt for generating ticket title and description from a single user text input
+GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT = """You are an expert AI assistant helping to create a Jira ticket from a user's description.
+Based on the following user's initial description, provide two pieces of information:
+1.  A suggested, concise Jira ticket title that captures the main actionable issue or request.
+2.  A refined and structured Jira ticket description. This description should start with a 2-3 line overview of the core issue/request, and if the user's input implies multiple steps, tasks, or distinct points, list them as bullet points under the overview. If relevant, subtly incorporate general IT/software context if it enhances clarity, but do not invent specifics not hinted at by the user. Ensure the language is professional and clear. Do NOT use subheadings in the description output.
+
+Return these two items formatted as a single JSON object with the keys "suggested_title" and "refined_description".
+Do NOT include any prefixed labels like 'Title:' or 'Description:' within the *values* of these JSON fields. The values should be the direct text for each component.
+
+User's Initial Description:
+--- BEGIN DESCRIPTION ---
+{user_description}
+--- END DESCRIPTION ---
+
+JSON Output:
 """ 

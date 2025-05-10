@@ -1,7 +1,8 @@
 import logging
 from slack_sdk.errors import SlackApiError
 from utils.state_manager import conversation_states
-from services.jira_service import fetch_my_jira_tickets # Will be created later
+from services.jira_service import fetch_my_jira_tickets
+from utils.slack_ui_helpers import build_rich_ticket_blocks
 import os
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,6 @@ def handle_my_tickets_period_selection(ack, body, client, logger, period_value):
     current_state = conversation_states.get(thread_ts)
     if not current_state or current_state["step"] != "awaiting_my_tickets_period":
         logger.warning(f"Received 'my_tickets_period' action for thread {thread_ts} but state is incorrect: {current_state}")
-        # Post error to user?
         return
 
     current_state["data"]["period"] = period_value
@@ -66,11 +66,8 @@ def handle_my_tickets_period_selection(ack, body, client, logger, period_value):
     conversation_states[thread_ts] = current_state
     logger.info(f"Stored period '{period_value}' for thread {thread_ts}. State: {current_state['step']}")
 
-    # Extract the text of the button that was clicked
-    clicked_button_text = "the selected period" # Default text
+    clicked_button_text = "the selected period"
     try:
-        # The action details are in body['actions'][0]
-        # The text of the button is in body['actions'][0]['text']['text']
         clicked_button_text = body["actions"][0]["text"]["text"]
     except (KeyError, IndexError) as e:
         logger.warning(f"Could not extract button text from period selection: {e}")
@@ -98,37 +95,32 @@ def handle_my_tickets_period_selection(ack, body, client, logger, period_value):
         logger.error(f"Error posting status selection for My Tickets: {e.response['error']}")
 
 def handle_my_tickets_status_selection(ack, body, client, logger, status_value):
-    """Handles status selection, fetches tickets from Jira, and displays them."""
+    """Handles status selection, fetches tickets from Jira, and displays them using rich format."""
     ack()
-    user_id = body["user"]["id"] # This is the Slack user ID
+    user_id = body["user"]["id"]
     channel_id = body["channel"]["id"]
     thread_ts = body["message"]["thread_ts"]
     assistant_id = body.get("assistant", {}).get("id")
     
     current_state = conversation_states.get(thread_ts)
     if not current_state or current_state["step"] != "awaiting_my_tickets_status":
-        logger.warning(f"Received 'my_tickets_status' action for thread {thread_ts} but state is not incorrect: {current_state}")
+        logger.warning(f"Received 'my_tickets_status' action for thread {thread_ts} but state is incorrect: {current_state}")
         return
 
     current_state["data"]["status"] = status_value
-    
-    # Fetch Slack user's profile to attempt to get a usable name for Jira query
     slack_user_id_for_query = current_state.get("user_id") 
     jira_query_assignee_name = None
     try:
         user_info_response = client.users_info(user=slack_user_id_for_query)
         if user_info_response and user_info_response.get("ok"):
             user_profile = user_info_response.get("user")
-            logger.debug(f"Slack user_info response for {slack_user_id_for_query}: {user_profile}") # DEBUG log for profile
-            
-            # Prioritize display_name if available and not empty, else real_name, else name
+            logger.debug(f"Slack user_info response for {slack_user_id_for_query}: {user_profile}")
             if user_profile.get("profile") and user_profile["profile"].get("display_name") and user_profile["profile"]["display_name"].strip():
                 jira_query_assignee_name = user_profile["profile"]["display_name"].strip()
             elif user_profile.get("real_name") and user_profile["real_name"].strip():
                 jira_query_assignee_name = user_profile["real_name"].strip()
-            elif user_profile.get("name") and user_profile["name"].strip(): # 'name' is often the username
+            elif user_profile.get("name") and user_profile["name"].strip():
                 jira_query_assignee_name = user_profile["name"].strip()
-            
             if jira_query_assignee_name:
                 logger.info(f"Fetched Slack user profile for {slack_user_id_for_query}. Using resolved name for Jira query: '{jira_query_assignee_name}'")
             else:
@@ -140,16 +132,9 @@ def handle_my_tickets_status_selection(ack, body, client, logger, status_value):
     except Exception as e:
         logger.error(f"Generic error fetching user info for {slack_user_id_for_query}: {e}", exc_info=True)
 
-    # Decide which identifier to use for the JQL query
-    name_for_jql_query = None
-    if jira_query_assignee_name: # If we successfully got a Slack name
-        name_for_jql_query = jira_query_assignee_name
-    else:
-        # Fallback or specific error handling if name resolution fails
-        logger.warning(f"Assignee name for JQL could not be resolved from Slack profile for {slack_user_id_for_query}. Check previous logs.")
-        # Depending on requirements, you might want to use JIRA_USER_NAME from .env as a global fallback
-        # or inform the user they need to link their account, or simply fail here.
-        # For now, if name resolution failed, we won't proceed with a query that's likely to be wrong.
+    name_for_jql_query = jira_query_assignee_name
+    if not name_for_jql_query:
+        logger.warning(f"Assignee name for JQL could not be resolved from Slack profile for {slack_user_id_for_query}.")
         try:
             client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text="Sorry, I couldn't identify your Jira username from your Slack profile to fetch your tickets. Please ensure your Slack profile name/display name is set and similar to your Jira username.")
         except Exception as e_post:
@@ -164,59 +149,48 @@ def handle_my_tickets_status_selection(ack, body, client, logger, status_value):
     status = current_state["data"]["status"]
     logger.info(f"Fetching 'My Tickets' for user (Slack ID: {slack_user_id_for_query}, Using for JQL Assignee: '{name_for_jql_query}') with period: {period}, status: {status} in thread {thread_ts}.")
 
-    # Set status before API call
     if assistant_id:
         try: client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="Fetching your tickets...")
         except Exception as e: logger.error(f"Error setting status for My Tickets fetch: {e}")
 
-    # Call Jira service to fetch tickets
-    ticket_ids = fetch_my_jira_tickets(assignee_id=name_for_jql_query, period=period, status=status)
+    fetched_tickets = fetch_my_jira_tickets(assignee_id=name_for_jql_query, period=period, status=status)
 
-    # Define action_text based on the current (status) button click for messaging
-    action_text = "selected criteria" # Default
+    action_text = "selected criteria"
     if body.get("actions") and isinstance(body["actions"], list) and len(body["actions"]) > 0:
         if body["actions"][0].get("text") and isinstance(body["actions"][0]["text"], dict):
             action_text = body["actions"][0]["text"].get("text", "selected criteria")
 
-    if ticket_ids is None: # Error in fetching
+    if fetched_tickets is None:
         try:
             client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text="Sorry, I couldn't fetch your tickets from Jira at the moment.")
         except Exception as e:
             logger.error(f"Error posting fetch_my_jira_tickets failure message: {e}")
-    elif not ticket_ids: # No tickets found
+    elif not fetched_tickets:
         try:
-            # action_text is already defined above now
             client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"No tickets found for you with status '{status}' in the timeframe corresponding to '{action_text}'.")
         except Exception as e:
             logger.error(f"Error posting no tickets found message: {e}")
     else:
-        # Display the ticket IDs in an "awesome block"
         blocks = [
             {
                 "type": "section",
-                # action_text is defined above
                 "text": {"type": "mrkdwn", "text": f"Here are your tickets with status *{status}* (timeframe: *{action_text}*)."}
-            },
-            {"type": "divider"}
+            }
+            # Divider will be added by build_rich_ticket_blocks for each ticket
         ]
-        for ticket_id in ticket_ids[:20]: # Limit to avoid huge messages
-            # TODO: Get JIRA_SERVER from env for a direct link
-            jira_server_url = os.environ.get("JIRA_SERVER", "https://your-jira-instance.com") # Fallback
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*<{jira_server_url}/browse/{ticket_id}|{ticket_id}>*"}
-                # Add more details or buttons per ticket if needed later
-            })
-        if len(ticket_ids) > 20:
-            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"And {len(ticket_ids) - 20} more..."}]})
+        for ticket_data in fetched_tickets[:20]: # Limit to avoid huge messages
+            rich_ticket_blocks = build_rich_ticket_blocks(ticket_data) # No action elements for these tickets
+            blocks.extend(rich_ticket_blocks)
+            
+        if len(fetched_tickets) > 20:
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"And {len(fetched_tickets) - 20} more..."}]})
 
         try:
-            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, blocks=blocks, text=f"Found {len(ticket_ids)} tickets.")
-            logger.info(f"Displayed {len(ticket_ids)} ticket IDs for 'My Tickets' in thread {thread_ts}.")
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, blocks=blocks, text=f"Found {len(fetched_tickets)} tickets.")
+            logger.info(f"Displayed {len(fetched_tickets)} tickets using rich format for 'My Tickets' in thread {thread_ts}.")
         except SlackApiError as e:
             logger.error(f"Error displaying My Tickets list: {e.response['error']}")
 
-    # Clear state and status
     if thread_ts in conversation_states:
         del conversation_states[thread_ts]
         logger.info(f"Cleared state for 'My Tickets' flow, thread {thread_ts}.")

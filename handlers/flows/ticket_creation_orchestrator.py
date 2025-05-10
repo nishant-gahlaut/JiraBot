@@ -3,6 +3,7 @@ import json
 from slack_sdk.errors import SlackApiError
 
 from services.duplicate_detection_service import find_and_summarize_duplicates
+from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 # conversation_states is not directly manipulated here, only context passed through button values
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,6 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
         overall_similarity_summary = duplicate_results.get("summary", "Could not generate an overall summary for similar tickets.")
         logger.info(f"Thread {thread_ts}: Orchestrator - Duplicate detection found {len(top_tickets)} potential matches.")
 
-        # Prepare context for the CTA buttons
         button_context_value = {
             "initial_description": initial_description,
             "thread_ts": str(thread_ts),
@@ -57,28 +57,41 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
         if top_tickets:
             for i, ticket_dict in enumerate(top_tickets):
                 current_metadata = ticket_dict.get('metadata', {})
-                page_content = ticket_dict.get('page_content', '')
-                ticket_id_meta = current_metadata.get('ticket_id', f'Similar Ticket {i+1}')
-                ticket_url_meta = current_metadata.get('url')
-                preview_text = page_content[:150].replace('\n', ' ') + "..."
-                ticket_display_text = f"*<{ticket_url_meta}|{ticket_id_meta}>*" if ticket_url_meta else f"*{ticket_id_meta}*"
                 
-                blocks_for_duplicates.extend([
-                    {"type": "section", "text": {"type": "mrkdwn", "text": f"{ticket_display_text}\n*Preview:* {preview_text}"}},
-                    {"type": "actions", "elements": [{
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Summarize this ticket", "emoji": True},
-                        "action_id": "summarize_specific_duplicate_ticket",
-                        "value": json.dumps({
-                            "ticket_id_to_summarize": ticket_id_meta,
-                            "thread_ts": str(thread_ts),
-                            "channel_id": str(channel_id),
-                            "user_id": str(user_id),
-                            "assistant_id": str(assistant_id) if assistant_id else None
-                        })
-                    }]},
-                    {"type": "divider"}
-                ])
+                ticket_key = current_metadata.get('ticket_id', f'Similar Ticket {i+1}')
+                ticket_url = current_metadata.get('url')
+                summary = current_metadata.get('summary', 'No summary available')
+                status = current_metadata.get('status', 'Unknown')
+                priority = current_metadata.get('priority', 'Unknown')
+                assignee = current_metadata.get('assignee', 'Unassigned')
+                issue_type = current_metadata.get('issue_type', 'Unknown')
+
+                ticket_data_for_helper = {
+                    'ticket_key': ticket_key,
+                    'summary': summary,
+                    'url': ticket_url,
+                    'status': status,
+                    'priority': priority,
+                    'assignee': assignee,
+                    'issue_type': issue_type
+                }
+
+                action_elements_for_ticket = [{
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Summarize this ticket", "emoji": True},
+                    "action_id": "summarize_specific_duplicate_ticket",
+                    "value": json.dumps({
+                        "ticket_id_to_summarize": ticket_key,
+                        "thread_ts": str(thread_ts),
+                        "channel_id": str(channel_id),
+                        "user_id": str(user_id),
+                        "assistant_id": str(assistant_id) if assistant_id else None
+                    })
+                }]
+                
+                rich_ticket_display_blocks = build_rich_ticket_blocks(ticket_data_for_helper, action_elements_for_ticket)
+                blocks_for_duplicates.extend(rich_ticket_display_blocks)
+
             if overall_similarity_summary:
                 blocks_for_duplicates.append({"type": "section", "text": {"type": "mrkdwn", "text": f"""*Overall Similarity Summary:*\n{overall_similarity_summary}"""}})
         else:

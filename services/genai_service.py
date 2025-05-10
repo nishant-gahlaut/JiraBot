@@ -6,7 +6,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import json
 
 # Import prompts
-from utils.prompts import GENERATE_TICKET_TITLE_PROMPT, GENERATE_TICKET_DESCRIPTION_PROMPT, GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT
+from utils.prompts import GENERATE_TICKET_TITLE_PROMPT, GENERATE_TICKET_DESCRIPTION_PROMPT, GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT, GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +233,66 @@ def generate_ticket_components_from_thread(slack_thread_conversation: str) -> di
         logger.error(f"An unexpected error occurred during ticket component generation: {e}", exc_info=True)
         return {
             "thread_summary": f"Unexpected error: {e}",
+            "suggested_title": f"Unexpected error: {e}",
+            "refined_description": f"Unexpected error: {e}"
+        }
+
+def generate_ticket_title_and_description_from_text(user_text: str) -> dict:
+    """
+    Generates a suggested Jira title and refined Jira description from a single user text input
+    in a single LLM call, expecting a JSON output.
+    """
+    if not user_text or user_text.isspace():
+        logger.warning("User text is empty. Cannot generate ticket title and description.")
+        return {
+            "suggested_title": "Could not generate title: Empty input.",
+            "refined_description": "Could not generate description: Empty input."
+        }
+
+    prompt = GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT.format(user_description=user_text)
+    logger.info(f"Generating ticket title and description from text: '{user_text[:200]}...'")
+    
+    raw_llm_output = generate_text(prompt)
+
+    if isinstance(raw_llm_output, str) and raw_llm_output.startswith("Error:"):
+        logger.error(f"LLM call failed for title/description generation: {raw_llm_output}")
+        return {
+            "suggested_title": f"Error during title generation: {raw_llm_output}",
+            "refined_description": f"Error during description generation: {raw_llm_output}"
+        }
+    
+    try:
+        cleaned_output = raw_llm_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[len("```json"):].strip()
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[len("```"):].strip()
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-len("```")].strip()
+        
+        logger.debug(f"Cleaned LLM output for JSON parsing: {cleaned_output}")
+        components = json.loads(cleaned_output)
+        
+        if not all(key in components for key in ["suggested_title", "refined_description"]):
+            logger.error(f"LLM output parsed as JSON, but missing required keys ('suggested_title', 'refined_description'). Output: {components}")
+            missing_keys_message = "LLM output was missing some components."
+            return {
+                "suggested_title": components.get("suggested_title", missing_keys_message),
+                "refined_description": components.get("refined_description", missing_keys_message)
+            }
+        
+        logger.info("Successfully generated and parsed ticket title and description from text.")
+        return components
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
+        return {
+            "suggested_title": "Error: Could not parse AI title output.",
+            "refined_description": "Error: Could not parse AI description output. Raw LLM output was: " + raw_llm_output[:200] + "..."
+        }
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during title/description generation: {e}", exc_info=True)
+        return {
             "suggested_title": f"Unexpected error: {e}",
             "refined_description": f"Unexpected error: {e}"
         }

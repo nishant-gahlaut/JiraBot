@@ -1,4 +1,7 @@
 import logging
+import os
+import json # For logging and potentially constructing payloads
+import requests # For making Jira API calls
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,41 @@ def build_jira_payload_fields(ticket_data_from_slack):
             ]
         }
     
+    # New Assignee mapping logic
+    assignee_email = ticket_data_from_slack.get("assignee_email")
+    if assignee_email:
+        logger.info(f"Attempting to map assignee via email: {assignee_email}")
+        jira_base_url = os.environ.get("JIRA_BASE_URL")
+        jira_user_email_auth = os.environ.get("JIRA_USER_EMAIL") # For auth
+        jira_api_token = os.environ.get("JIRA_API_TOKEN")
+
+        if not all([jira_base_url, jira_user_email_auth, jira_api_token]):
+            logger.warning("Jira API credentials for user search (JIRA_BASE_URL, JIRA_USER_EMAIL, JIRA_API_TOKEN) are not fully configured in jira_payload_mapper. Cannot search for assignee.")
+        else:
+            search_url = f"{jira_base_url.rstrip('/')}/rest/api/3/user/search?query={assignee_email}"
+            auth = (jira_user_email_auth, jira_api_token)
+            headers = {"Accept": "application/json"}
+            try:
+                response = requests.get(search_url, headers=headers, auth=auth, timeout=10)
+                response.raise_for_status()
+                users = response.json()
+                active_users = [user for user in users if user.get("active", False)]
+                
+                if len(active_users) == 1:
+                    jira_account_id = active_users[0]["accountId"]
+                    payload_fields["assignee"] = {"accountId": jira_account_id}
+                    logger.info(f"Successfully mapped Slack user email '{assignee_email}' to Jira accountId '{jira_account_id}' and set assignee.")
+                elif len(active_users) == 0:
+                    logger.warning(f"No active Jira user found for email '{assignee_email}'. Ticket will be unassigned.")
+                else:
+                    logger.warning(f"Multiple active Jira users found for email '{assignee_email}'. Cannot determine unique assignee. Ticket will be unassigned. Found: {[(u.get('displayName'), u.get('accountId')) for u in active_users]}")
+            except requests.exceptions.HTTPError as e:
+                logger.error(f"HTTP error searching for Jira user with email '{assignee_email}': {e.response.status_code} - {e.response.text}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request error searching for Jira user with email '{assignee_email}': {e}")
+            except Exception as e:
+                logger.error(f"Unexpected error searching for Jira user with email '{assignee_email}': {e}")
+
     # Priority (currently commented out, can be re-enabled and refined here)
     # if ticket_data_from_slack.get("priority"):
     #     priority_value_from_slack = ticket_data_from_slack["priority"]
@@ -71,13 +109,9 @@ def build_jira_payload_fields(ticket_data_from_slack):
     #         "P0": "Highest", "P1": "High", "P2": "Medium",
     #         "P3": "Low", "P4": "Lowest"
     #     }
-    #     jira_priority_name = priority_map.get(priority_value_from_slack)
-    #     if jira_priority_name:
-    #         payload_fields["priority"] = {"name": jira_priority_name}
-    #         logger.info(f"Mapped Slack priority '{priority_value_from_slack}' to Jira priority name '{jira_priority_name}'")
-    #     else:
-    #         payload_fields["priority"] = {"name": priority_value_from_slack} # Fallback
-    #         logger.warning(f"Priority value '{priority_value_from_slack}' from Slack not in explicit map. Sending directly as name.")
+    #     jira_priority_name = priority_map.get(priority_value_from_slack, priority_value_from_slack) # Fallback to raw value
+    #     payload_fields["priority"] = {"name": jira_priority_name}
+    #     logger.info(f"Set Jira priority to name: '{jira_priority_name}' based on Slack value '{priority_value_from_slack}'")
 
     # Labels
     if ticket_data_from_slack.get("labels"):
@@ -86,15 +120,6 @@ def build_jira_payload_fields(ticket_data_from_slack):
             payload_fields["labels"] = labels
         elif isinstance(labels, str) and labels.strip(): # Handle if it's a single string
              payload_fields["labels"] = [label.strip() for label in labels.split(',')]
-
-
-    # Assignee (requires mapping Slack User ID to Jira Account ID - this is a TODO)
-    # The ticket_data_from_slack["assignee_id"] is a Slack User ID.
-    # This mapping logic should ideally exist elsewhere or be passed in if complex.
-    # For now, we are not adding it to payload_fields here unless a mapped ID is provided.
-    # if ticket_data_from_slack.get("assignee_jira_account_id"): # Example if you had a mapped ID
-    #     payload_fields["assignee"] = {"accountId": ticket_data_from_slack["assignee_jira_account_id"]}
-
 
     # Handle Custom Fields based on CUSTOM_FIELD_CONFIG
     for slack_key, jira_config in CUSTOM_FIELD_CONFIG.items():

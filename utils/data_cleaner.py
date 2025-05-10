@@ -72,6 +72,7 @@ def clean_jira_data(raw_issue_data, ticket_id):
         cleaned_data['description'] = (fields.get('description') or '').strip()
         cleaned_data['status'] = fields.get('status', {}).get('name', 'Unknown')
         cleaned_data['priority'] = fields.get('priority', {}).get('name', 'Unknown')
+        cleaned_data['issue_type'] = fields.get('issuetype', {}).get('name', 'Unknown')
         cleaned_data['reporter'] = fields.get('reporter', {}).get('displayName', 'Unknown')
         assignee_field = fields.get('assignee')
         cleaned_data['assignee'] = assignee_field.get('displayName') if assignee_field else None

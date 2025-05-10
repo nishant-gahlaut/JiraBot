@@ -108,48 +108,61 @@ def fetch_jira_ticket_data(ticket_id):
     return raw_issue_object
 
 def fetch_my_jira_tickets(assignee_id, period, status):
-    """Fetches a list of ticket IDs assigned to a user based on period and status."""
+    """Fetches a list of tickets assigned to a user, with details, based on period and status."""
     if not jira_client:
         logger.error("Jira client is not initialized. Cannot fetch 'My Tickets'.")
         return None
 
-    # Convert period to JQL relative date (e.g., -1w, -2w, -1m)
-    # Assuming period_value from action_id (e.g., "1w", "2w", "1m")
-    if period == "1m": # Jira often prefers weeks or specific dates for updated
-        jql_period = "-4w" # Approximate 1 month as 4 weeks
+    if period == "1m":
+        jql_period = "-4w"
     else:
         jql_period = f"-{period}"
 
-    # Construct JQL query
-    # Note: For assignee, Jira usually expects the Jira username or accountId.
-    # If assignee_id is Slack ID, a mapping would be needed in a real scenario.
-    # For now, we are assuming assignee_id might be a Jira username or accountId directly.
-    # Or, if we want tickets reported BY the user, we'd use `reporter = "{assignee_id}"`
-    # For tickets ASSIGNED to the user: `assignee = "{assignee_id}"`
-    # Let's assume for "My Tickets" we mean tickets assigned to the user.
     jql_query = f'assignee = "{assignee_id}" AND status = "{status}" AND updated >= {jql_period} ORDER BY updated DESC'
-    # If you want to use the JIRA_USER_NAME from .env as the assignee for testing:
-    # current_jira_user = os.environ.get("JIRA_USER_NAME")
-    # if current_jira_user:
-    #     jql_query = f'assignee = "{current_jira_user}" AND status = "{status}" AND updated >= {jql_period} ORDER BY updated DESC'
-    # else:
-    #     logger.warning("JIRA_USER_NAME not set, cannot reliably query current user's tickets without a specific assignee_id.")
-    #     return [] # Return empty if no user to query for
-        
     logger.info(f"Executing JQL query for My Tickets: {jql_query}")
 
+    tickets_with_details = []
     try:
-        # Search for issues using JQL
-        # maxResults can be adjusted. Fields limited to 'key' for just IDs.
-        issues = jira_client.search_issues(jql_query, maxResults=50, fields="key")
-        ticket_ids = [issue.key for issue in issues]
-        logger.info(f"Found {len(ticket_ids)} tickets for query: {jql_query}")
-        return ticket_ids
+        # Request specific fields needed for rich display
+        # Note: 'key' is implicitly returned. Add others explicitly if not covered by a default set.
+        fields_to_fetch = ["summary", "status", "priority", "assignee", "issuetype"]
+        
+        issues = jira_client.search_issues(jql_query, maxResults=50, fields=fields_to_fetch, expand=None) # Explicitly set expand to None or minimal if not needed
+        
+        jira_base_url_for_link = os.environ.get("JIRA_SERVER", "") # Use JIRA_SERVER for consistency with .env
+
+        for issue in issues:
+            assignee_name = issue.fields.assignee.displayName if issue.fields.assignee else "Unassigned"
+            priority_name = issue.fields.priority.name if issue.fields.priority else "N/A"
+            
+            ticket_detail = {
+                "ticket_key": issue.key,
+                "summary": issue.fields.summary if hasattr(issue.fields, 'summary') else "No summary",
+                "url": f"{jira_base_url_for_link.rstrip('/')}/browse/{issue.key}" if jira_base_url_for_link else None,
+                "status": issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else "N/A",
+                "priority": priority_name,
+                "assignee": assignee_name,
+                "issue_type": issue.fields.issuetype.name if hasattr(issue.fields, 'issuetype') and issue.fields.issuetype else "N/A"
+            }
+            tickets_with_details.append(ticket_detail)
+            
+        logger.info(f"Found {len(tickets_with_details)} tickets with details for query: {jql_query}")
+        return tickets_with_details
+        
     except JIRAError as e:
         logger.error(f"JIRA API Error searching issues for 'My Tickets': {e.status_code} - {e.text}")
-        return None # Indicate an error occurred
+        return None 
+    except AttributeError as ae:
+        # This can happen if a field (e.g. issue.fields.assignee) is None and we try to access a sub-attribute like .displayName
+        logger.error(f"AttributeError processing issue fields for 'My Tickets' JQL '{jql_query}': {ae}. This might indicate missing data for an issue.", exc_info=True)
+        # Depending on strictness, you might return partial results or None
+        # For now, let's return what we have, but this indicates a potential data issue or an issue in an unexpected state.
+        if tickets_with_details: 
+            logger.warning("Returning partially collected ticket details due to AttributeError.")
+            return tickets_with_details
+        return None # Or an empty list if preferred: []
     except Exception as e:
-        logger.error(f"Unexpected error searching issues for 'My Tickets': {e}")
+        logger.error(f"Unexpected error searching issues for 'My Tickets': {e}", exc_info=True)
         return None 
 
 def create_jira_ticket(ticket_data):

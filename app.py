@@ -80,6 +80,8 @@ from services.jira_service import create_jira_ticket
 from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options
 # Import AI title/description generators
 from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread
+# Import UI helpers
+from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 
 # Load environment variables from .env file
 load_dotenv()
@@ -438,28 +440,52 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
 
     logger.info(f"Mention flow: 'Find Similar Issues' clicked by {user_id} in thread {thread_ts}")
 
-    conversation_key = f"{thread_ts}_{user_id}_mention_context"
-    mention_context = conversation_states.get(conversation_key)
+    # Construct the key to retrieve mention context, matching how it's set in mention_handler.py
+    # It seems mention_handler uses a key like f"{event_thread_ts}_{event_user_id}_{channel_id}_mention_context"
+    # We need to ensure this key is consistent or passed correctly. The button value might be more reliable if it stores it.
+    mention_context_key_from_button = None
+    original_user_id_for_context = user_id # Default to user who clicked if key not found
+    try:
+        if body.get("actions") and body["actions"][0].get("value"):
+            button_value = json.loads(body["actions"][0]["value"])
+            mention_context_key_from_button = button_value.get("mention_context_key")
+            # If the original user_id was stored in the button value during its creation, use that for context key.
+            original_user_id_for_context = button_value.get("original_user_id", user_id)
+            logger.info(f"Retrieved mention_context_key '{mention_context_key_from_button}' and original_user_id '{original_user_id_for_context}' from button value.")
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        logger.warning(f"Could not parse button value JSON for mention_context_key or original_user_id: {e}. Value: {body.get('actions', [{}])[0].get('value')}")
+        # Fallback: Try to construct the key if not in button. This is less robust.
+        # This assumes the user_id in body["user"]["id"] is the one who originally triggered the mention.
+        # This might not always be true if someone else clicks a button on a message generated for another user.
+        # The original_user_id should ideally be part of the CTA that leads here.
+        # For now, if not in button, we use user_id who clicked.
+        # mention_context_key_from_button = f"{thread_ts}_{user_id}_mention_context"
+        # logger.info(f"Falling back to constructed mention_context_key: {mention_context_key_from_button}")
 
+    actual_mention_context_key = mention_context_key_from_button
+    mention_context = None
+    if actual_mention_context_key:
+        mention_context = conversation_states.get(actual_mention_context_key)
+    
     summary_to_search = ""
     if mention_context and "summary" in mention_context:
         summary_to_search = mention_context["summary"]
-        logger.info(f"Retrieved summary for duplicate search: {summary_to_search[:100]}...")
+        logger.info(f"Retrieved summary for duplicate search using key '{actual_mention_context_key}': {summary_to_search[:100]}...")
     else:
-        logger.warning(f"Could not retrieve summary from conversation_states for key {conversation_key}. Cannot find similar issues.")
-        client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, user=user_id, text="Sorry, I couldn't retrieve the conversation summary to search for similar issues.")
+        logger.warning(f"Could not retrieve summary from conversation_states for key '{actual_mention_context_key}'. Cannot find similar issues.")
+        client.chat_postEphemeral(channel=channel_id, thread_ts=thread_ts, user=user_id, text="Sorry, I couldn't retrieve the conversation summary to search for similar issues. Please try mentioning me again.")
         return
 
     if not summary_to_search.strip():
         logger.warning("Summary to search is empty. Aborting find similar issues.")
-        client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, user=user_id, text="The conversation summary was empty, so I can't search for similar issues.")
+        client.chat_postEphemeral(channel=channel_id, thread_ts=thread_ts, user=user_id, text="The conversation summary was empty, so I can't search for similar issues.")
         return
         
     try:
-        # Inform user work is in progress
-        client.chat_postMessage(
+        client.chat_postEphemeral(
             channel=channel_id, 
             thread_ts=thread_ts, 
+            user=user_id,
             text=f"Thanks, <@{user_id}>! Searching for JIRA tickets similar to the conversation summary..."
         )
 
@@ -471,40 +497,38 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
         if top_tickets:
             response_blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"""Here are some existing JIRA tickets that might be related to the conversation:
-
-{overall_summary}"""}
+                "text": {"type": "mrkdwn", "text": f"Here are some existing JIRA tickets that might be related to the conversation:"}
             })
-            response_blocks.append({"type": "divider"})
-            for ticket in top_tickets:
-                ticket_id = ticket.get("metadata", {}).get("ticket_id", "Unknown ID")
-                ticket_url = ticket.get("metadata", {}).get("url")
-                ticket_desc_snippet = ticket.get("page_content", "No content available.")[:200] # Langchain Document content
-                
-                link_md = f"*{ticket_id}*"
-                if ticket_url:
-                    link_md = f"*<{ticket_url}|{ticket_id}>*"
+            if overall_summary and overall_summary != "Could not generate an overall summary for similar tickets.":
+                 response_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_{overall_summary}_"}})
+            # response_blocks.append({"type": "divider"}) # Divider will be added by build_rich_ticket_blocks
 
-                response_blocks.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"""{link_md}:
->{ticket_desc_snippet}..."""}
-                })
-            response_blocks.append({"type": "divider"})
+            for ticket_info_dict in top_tickets:
+                current_metadata = ticket_info_dict.get("metadata", {})
+                # Ensure all necessary fields for build_rich_ticket_blocks are present
+                ticket_data_for_blocks = {
+                    'ticket_key': current_metadata.get('ticket_id', 'Unknown ID'),
+                    'summary': current_metadata.get('summary', current_metadata.get('page_content', 'No summary')[:100]), # Fallback for summary
+                    'url': current_metadata.get('url'),
+                    'status': current_metadata.get('status', 'N/A'),
+                    'priority': current_metadata.get('priority', 'N/A'),
+                    'assignee': current_metadata.get('assignee', 'Unassigned'),
+                    'issue_type': current_metadata.get('issue_type', 'N/A')
+                }
+                rich_ticket_blocks = build_rich_ticket_blocks(ticket_data_for_blocks) # No action elements needed here
+                response_blocks.extend(rich_ticket_blocks)
         else:
             response_blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"""I searched based on the conversation summary, but couldn't find any closely matching JIRA tickets.
-
-Summary I used for search:
->>> {summary_to_search}"""}
+                "text": {"type": "mrkdwn", "text": f"I searched based on the conversation summary, but couldn't find any closely matching JIRA tickets."}
             })
+            if summary_to_search:
+                 response_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_Summary I used for search:_\n>>> {summary_to_search}"}})
         
         response_blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "You can still choose to create a new ticket if needed."}
+            "text": {"type": "mrkdwn", "text": "You can still choose to create a new ticket if needed from the mention options."}
         })
-
 
         client.chat_postMessage(
             channel=channel_id,
@@ -513,6 +537,11 @@ Summary I used for search:
             text="Here are the results of the similarity search."
         )
         logger.info(f"Posted similar tickets results for mention flow in thread {thread_ts}")
+
+        # Clean up the specific mention context state if it was successfully used
+        if actual_mention_context_key and actual_mention_context_key in conversation_states:
+            del conversation_states[actual_mention_context_key]
+            logger.info(f"Thread {thread_ts}: Cleared mention context state '{actual_mention_context_key}' after finding similar issues.")
 
     except Exception as e:
         logger.error(f"Error during mention_flow_find_issues: {e}", exc_info=True)
@@ -523,7 +552,7 @@ Summary I used for search:
 @app.view("create_ticket_modal_submission") # Changed from "create_ticket_modal" to match the modal's callback_id
 def handle_modal_submission(ack, body, client, view, logger):
     private_metadata_str = view.get("private_metadata")
-    logger.info(f"Modal submitted with view_id 'create_ticket_modal_submission'. Private metadata: {private_metadata_str}") # Updated log message
+    logger.info(f"Modal submitted with view_id 'create_ticket_modal_submission'. Private metadata: {private_metadata_str}")
 
     user_id = body["user"]["id"]
     state_data = conversation_states.get(private_metadata_str)
@@ -531,53 +560,52 @@ def handle_modal_submission(ack, body, client, view, logger):
     if not state_data:
         ack_text = "Error: Couldn't find context for this submission. Please try starting over."
         logger.error(f"No state found for private_metadata_key: {private_metadata_str} in modal submission.")
-        ack(response_action="errors", errors={"title_input_block": ack_text}) # Error on a specific field
+        ack(response_action="errors", errors={"summary_block": ack_text}) # Error on a specific field (summary_block as an example)
         return
 
     submission_channel_id = state_data.get("channel_id")
     submission_thread_ts = state_data.get("thread_ts")
     
     submitted_values = view["state"]["values"]
-    # Corrected keys according to modal definition in interaction_handlers.py
     jira_title = submitted_values["summary_block"]["summary_input"]["value"]
     jira_description = submitted_values["description_block"]["description_input"]["value"]
-
-    # Extract other fields from the modal submission
-    # The actual keys will depend on the block_id and action_id in build_create_ticket_modal
     selected_issue_type = submitted_values.get("issue_type_block", {}).get("issue_type_select", {}).get("selected_option", {}).get("value")
     selected_priority = submitted_values.get("priority_block", {}).get("priority_select", {}).get("selected_option", {}).get("value")
     selected_assignee_id = submitted_values.get("assignee_block", {}).get("assignee_select", {}).get("selected_user")
     selected_labels_data = submitted_values.get("label_block", {}).get("label_select", {}).get("selected_options", [])
     selected_labels = [opt["value"] for opt in selected_labels_data] if selected_labels_data else []
     
-    # Optional fields from the modal (single static_select)
+    assignee_email_to_send = None
+    if selected_assignee_id:
+        try:
+            user_info_response = client.users_info(user=selected_assignee_id)
+            if user_info_response and user_info_response.get("ok"):
+                assignee_email_to_send = user_info_response.get("user", {}).get("profile", {}).get("email")
+                logger.info(f"Fetched email '{assignee_email_to_send}' for Slack user ID '{selected_assignee_id}'")
+            else:
+                logger.warning(f"Could not fetch profile or email for Slack user ID '{selected_assignee_id}'. API response: {user_info_response.get('error') if user_info_response else 'empty response'}")
+        except SlackApiError as e_user:
+            logger.error(f"Slack API error fetching user info for {selected_assignee_id}: {e_user.response['error']}")
+        except Exception as e_user_generic:
+            logger.error(f"Generic error fetching user info for {selected_assignee_id}: {e_user_generic}")
+
     team_option = submitted_values.get("team_block", {}).get("team_select", {}).get("selected_option")
     selected_team = team_option.get("value") if team_option else None
-
     brand_option = submitted_values.get("brand_block", {}).get("brand_select", {}).get("selected_option")
     selected_brand = brand_option.get("value") if brand_option else None
-
     environment_option = submitted_values.get("environment_block", {}).get("environment_select", {}).get("selected_option")
     selected_environment = environment_option.get("value") if environment_option else None
-
     product_option = submitted_values.get("product_block", {}).get("product_select", {}).get("selected_option")
     selected_product = product_option.get("value") if product_option else None
-
-    # Optional fields from the modal (multi static_select) - these are already robust
     selected_task_types_data = submitted_values.get("task_type_block", {}).get("task_type_select", {}).get("selected_options", [])
     selected_task_types = [opt["value"] for opt in selected_task_types_data] if selected_task_types_data else []
     selected_root_causes_data = submitted_values.get("root_cause_block", {}).get("root_cause_select", {}).get("selected_options", [])
     selected_root_causes = [opt["value"] for opt in selected_root_causes_data] if selected_root_causes_data else []
 
-
     logger.info(f"Modal submission by {user_id} for state key {private_metadata_str}: Title='{jira_title}', Desc='{jira_description[:50]}...'")
-    logger.info(f"Modal values - Issue Type: {selected_issue_type}, Prio: {selected_priority}, Assignee: {selected_assignee_id}, Labels: {selected_labels}")
-    logger.info(f"Modal optional - Team: {selected_team}, Brand: {selected_brand}, Env: {selected_environment}, Product: {selected_product}, TaskTypes: {selected_task_types}, RootCauses: {selected_root_causes}")
-
-    ack() # Acknowledge the view submission immediately
+    ack() 
 
     project_key_from_env = os.environ.get("TICKET_CREATION_PROJECT_ID", "PROJ")
-    # Use the issue type selected in the modal, or fallback to a default
     issue_type_to_create = selected_issue_type if selected_issue_type else "Task"
 
     ticket_payload_data = {
@@ -585,10 +613,10 @@ def handle_modal_submission(ack, body, client, view, logger):
         "description": jira_description,
         "project_key": project_key_from_env, 
         "issue_type": issue_type_to_create,
-        "priority": selected_priority, # Pass priority from modal
-        "assignee_id": selected_assignee_id, # Pass assignee from modal (needs mapping in Jira service)
-        "labels": selected_labels, # Pass labels from modal
-        # Pass other optional fields to ticket_data for build_jira_payload_fields
+        "priority": selected_priority,
+        "assignee_slack_id": selected_assignee_id,
+        "assignee_email": assignee_email_to_send,
+        "labels": selected_labels,
         "team": selected_team,
         "brand": selected_brand,
         "environment": selected_environment,
@@ -597,90 +625,62 @@ def handle_modal_submission(ack, body, client, view, logger):
         "root_causes": selected_root_causes
     }
     
-    confirmation_blocks = None
+    final_confirmation_blocks = []
     fallback_text = ""
 
     try:
         created_ticket_info = create_jira_ticket(ticket_payload_data)
-
-        # ===== BEGIN DETAILED LOGGING =====
         logger.info(f"Jira service call returned: {json.dumps(created_ticket_info, indent=2) if created_ticket_info else 'None'}")
-        # ===== END DETAILED LOGGING =====
 
         if created_ticket_info and created_ticket_info.get("key"):
-            key = created_ticket_info["key"]
-            url = created_ticket_info["url"]
-            title = created_ticket_info.get("title", jira_title) # Use title from response, fallback to submitted
-            status = created_ticket_info.get("status_name", "N/A")
-            issue_type = created_ticket_info.get("issue_type_name", issue_type_to_create)
-            assignee = created_ticket_info.get("assignee_name", "Unassigned")
-            priority = created_ticket_info.get("priority_name", selected_priority)
+            ticket_data_for_blocks = {
+                'ticket_key': created_ticket_info["key"],
+                'url': created_ticket_info["url"],
+                'summary': created_ticket_info.get("title", jira_title),
+                'status': created_ticket_info.get("status_name", "N/A"),
+                'issue_type': created_ticket_info.get("issue_type_name", issue_type_to_create),
+                'assignee': created_ticket_info.get("assignee_name", "Unassigned"),
+                'priority': created_ticket_info.get("priority_name", selected_priority if selected_priority else "N/A")
+            }
+            logger.info(f"Successfully created Jira ticket {ticket_data_for_blocks['ticket_key']} with details: Status='{ticket_data_for_blocks['status']}', Type='{ticket_data_for_blocks['issue_type']}', Assignee='{ticket_data_for_blocks['assignee']}', Priority='{ticket_data_for_blocks['priority']}'")
 
-            type_emoji = get_issue_type_emoji(issue_type)
-            priority_emoji = get_priority_emoji(priority)
-
-            logger.info(f"Successfully created Jira ticket {key} with details: Status='{status}', Type='{issue_type}', Assignee='{assignee}', Priority='{priority}'")
-
-            fallback_text = f"Ticket {key} created: {title}"
-            confirmation_blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"<@{user_id}> created a {issue_type} using Jira Bot"
-                    }
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*<{url}|{key} {title}>*"
-                    }
-                },
-                {
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"Status: *{status}*"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": f"{type_emoji} Type: *{issue_type}*"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": f"👤 Assignee: *{assignee}*"
-                        },
-                        {
-                            "type": "mrkdwn",
-                            "text": f"{priority_emoji} Priority: *{priority}*"
-                        }
-                    ]
+            fallback_text = f"Ticket {ticket_data_for_blocks['ticket_key']} created: {ticket_data_for_blocks['summary']}"
+            
+            # Add the initial user message
+            final_confirmation_blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"<@{user_id}> created a {ticket_data_for_blocks['issue_type']} using Jira Bot"
                 }
-            ]
+            })
+            
+            # Add the rich ticket display (without the divider, as it's the end of this specific display)
+            rich_blocks = build_rich_ticket_blocks(ticket_data_for_blocks) # No actions, no divider needed from helper
+            if rich_blocks and rich_blocks[-1].get("type") == "divider": # Remove default divider if present
+                rich_blocks.pop()
+            final_confirmation_blocks.extend(rich_blocks)
+
         else:
             logger.error(f"Failed to create Jira ticket or parse response. create_jira_ticket response: {created_ticket_info}")
             fallback_text = "⚠️ I tried to create the Jira ticket, but something went wrong. I didn't get all the ticket details back."
-            confirmation_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}]
+            final_confirmation_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}]
 
     except Exception as e:
         logger.error(f"Error creating Jira ticket from modal or building confirmation: {e}", exc_info=True)
         fallback_text = f"❌ Sorry, there was an error creating the Jira ticket: {str(e)}"
-        confirmation_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}]
+        final_confirmation_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": fallback_text}}]
 
     if submission_channel_id:
         try:
-            # ===== BEGIN DETAILED LOGGING FOR MESSAGE PAYLOAD =====
             logger.info(f"Attempting to post to channel {submission_channel_id}, thread {submission_thread_ts}")
             logger.info(f"Fallback text to be sent: {fallback_text}")
-            logger.info(f"Blocks to be sent: {json.dumps(confirmation_blocks, indent=2) if confirmation_blocks else 'None'}")
-            # ===== END DETAILED LOGGING FOR MESSAGE PAYLOAD =====
+            logger.info(f"Blocks to be sent: {json.dumps(final_confirmation_blocks, indent=2) if final_confirmation_blocks else 'None'}")
             client.chat_postMessage(
                 channel=submission_channel_id,
                 thread_ts=submission_thread_ts,
-                blocks=confirmation_blocks,
-                text=fallback_text # Fallback text for notifications
+                blocks=final_confirmation_blocks,
+                text=fallback_text
             )
         except Exception as e_post:
             logger.error(f"Failed to post ticket creation confirmation: {e_post}")
@@ -836,43 +836,6 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
             except Exception as e_ephemeral:
                 logger.error(f"Failed to send ephemeral error message: {e_ephemeral}")
 
-
-# --- Helper functions for rich ticket display ---
-def get_issue_type_emoji(issue_type_name: str) -> str:
-    """Returns an emoji for a given Jira issue type name."""
-    name_lower = issue_type_name.lower()
-    if "bug" in name_lower:
-        return "🐞"  # Bug
-    elif "task" in name_lower:
-        return "✅"  # Task
-    elif "story" in name_lower or "user story" in name_lower:
-        return "📖"  # Story
-    elif "epic" in name_lower:
-        return "⛰️"  # Epic
-    elif "improvement" in name_lower:
-        return "💡"  # Improvement
-    elif "sub-task" in name_lower or "subtask" in name_lower:
-        return "🔹" # Sub-task
-    elif "new feature" in name_lower:
-        return "✨" # New Feature
-    else:
-        return "📄"  # Default for other types
-
-def get_priority_emoji(priority_name: str) -> str:
-    """Returns an emoji for a given Jira priority name."""
-    name_lower = priority_name.lower()
-    if "highest" in name_lower or "critical" in name_lower or "p0" in name_lower:
-        return "🔥🔥"
-    elif "high" in name_lower or "p1" in name_lower:
-        return "⬆️"
-    elif "medium" in name_lower or "p2" in name_lower:
-        return "🟧" # Using an orange square as an example, Slack might render differently
-    elif "low" in name_lower or "p3" in name_lower:
-        return "⬇️"
-    elif "lowest" in name_lower or "p4" in name_lower:
-        return "📉"
-    else:
-        return "⚪" # Default
 
 # --- Start the App ---
 if __name__ == "__main__":

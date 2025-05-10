@@ -48,7 +48,7 @@ def scrape_and_store_tickets(project_key: str, total_tickets_to_scrape: int, api
         'ticket_id', 'summary', 'description', 'status', 'priority', 
         'reporter', 'assignee', 'created_at', 'updated_at', 'labels', 
         'components', 'owned_by_team', 'brand', 'product', 'geo_region', 
-        'environment', 'root_cause', 'sprint', 'comments', 'url' # Ensure URL is in headers if clean_jira_data provides it
+        'environment', 'root_cause', 'sprint', 'comments', 'url', 'issue_type' # Ensure URL is in headers if clean_jira_data provides it
     ]
 
     try:

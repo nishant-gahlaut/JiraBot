@@ -2,7 +2,7 @@ import logging
 import json
 from slack_sdk.errors import SlackApiError
 from utils.state_manager import conversation_states
-from services.genai_service import generate_suggested_title, generate_refined_description
+from services.genai_service import generate_ticket_title_and_description_from_text
 from handlers.modals.interaction_handlers import build_create_ticket_modal
 
 logger = logging.getLogger(__name__)
@@ -147,13 +147,15 @@ def handle_modify_after_ai(ack, body, client, logger):
 
 def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
     """Handles the 'Proceed with this Description' button after duplicate check. 
-       Now generates AI title AND AI refined description.
+       Uses a single LLM call to generate AI title AND AI refined description.
     """
     ack()
-    logger.info("'Proceed with this Description' button clicked. Generating AI title and description.")
+    logger.info("'Proceed with this Description' button clicked. Generating AI title and description via single call.")
     assistant_id = None
     thread_ts = None
     user_raw_initial_description = ""
+    channel_id = None # Initialize channel_id
+    user_id = None # Initialize user_id
 
     try:
         action_value = json.loads(body["actions"][0]["value"])
@@ -172,10 +174,25 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             except Exception as e:
                 logger.error(f"Thread {thread_ts}: Error setting status before GenAI: {e}")
 
-        suggested_title = generate_suggested_title(user_raw_initial_description)
-        logger.info(f"Thread {thread_ts}: GenAI suggested title: '{suggested_title}'")
+        # Single call to GenAI service
+        ai_components = generate_ticket_title_and_description_from_text(user_raw_initial_description)
+        
+        suggested_title = ai_components.get("suggested_title", "Could not generate title")
+        ai_refined_description = ai_components.get("refined_description", "Could not generate description. Original: " + user_raw_initial_description)
 
-        ai_refined_description = generate_refined_description(user_raw_initial_description)
+        # Check if generation failed (service methods return error strings in values)
+        if "Could not generate title" in suggested_title or "Could not generate description" in ai_refined_description or \
+           suggested_title.startswith("Error:") or ai_refined_description.startswith("Error:"):
+            logger.error(f"Thread {thread_ts}: AI generation failed. Title: '{suggested_title}', Description: '{ai_refined_description}'")
+            # Inform the user of the failure
+            error_message = "Sorry, I couldn't generate AI suggestions for your ticket. You can try again, or proceed to create the ticket manually."
+            if channel_id and user_id: # Ensure we have these before trying to post
+                 client.chat_postEphemeral(channel=channel_id, thread_ts=thread_ts, user=user_id, text=error_message)
+            # Potentially, we could offer to proceed without AI suggestions or retry.
+            # For now, we stop this path and let the user decide (e.g. re-click a button or give up).
+            return # Stop further processing in this handler on critical AI failure
+
+        logger.info(f"Thread {thread_ts}: GenAI suggested title: '{suggested_title}'")
         logger.info(f"Thread {thread_ts}: GenAI refined description: '{ai_refined_description[:150]}...'")
 
         conversation_states[thread_ts] = {
@@ -212,13 +229,16 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             }
         ]
 
-        client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            blocks=ai_confirmation_blocks,
-            text=f"AI Suggested Title: {suggested_title}"
-        )
-        logger.info(f"Thread {thread_ts}: Posted AI title and description suggestion with Continue/Modify buttons.")
+        if channel_id: # Ensure channel_id is available before posting
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                blocks=ai_confirmation_blocks,
+                text=f"AI Suggested Title: {suggested_title}"
+            )
+            logger.info(f"Thread {thread_ts}: Posted AI title and description suggestion with Continue/Modify buttons.")
+        else:
+            logger.error(f"Thread {thread_ts}: channel_id is None. Cannot post AI suggestions.")
 
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON from button value in handle_proceed_to_ai_title_suggestion: {e}")
@@ -250,29 +270,28 @@ def handle_cancel_creation_at_message_duplicates(ack, body, client, logger):
         # Attempt to clear any active step for this thread
         if thread_ts and thread_ts in conversation_states:
             del conversation_states[thread_ts]
-            logger.info(f"Thread {thread_ts}: Cleared state due to cancellation at duplicate check.")
+            logger.info(f"Thread {thread_ts}: Cleared conversation state due to cancellation.")
         
-        # Post a confirmation message
-        client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text=f"<@{user_id}>, the ticket creation process has been cancelled."
-        )
-        logger.info(f"Thread {thread_ts}: Posted cancellation confirmation for user {user_id}.")
+        if channel_id and user_id: # Ensure we have these to post
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"<@{user_id}>, the ticket creation process has been cancelled."
+            )
+            logger.info(f"Thread {thread_ts}: Posted ticket creation cancellation confirmation to user {user_id}.")
+        else:
+            logger.warning(f"Thread {thread_ts}: Could not post cancellation message due to missing channel_id or user_id.")
 
         # Clear assistant status if applicable
         if assistant_id and thread_ts:
-            try:
-                client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
-                logger.info(f"Thread {thread_ts}: Cleared assistant status after cancellation.")
-            except Exception as e_status:
-                logger.error(f"Thread {thread_ts}: Error clearing assistant status after cancellation: {e_status}")
+            client.assistant_threads_setStatus(assistant_id=assistant_id, thread_ts=thread_ts, status="")
+            logger.info(f"Thread {thread_ts}: Cleared assistant status after cancellation.")
 
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from button value in handle_cancel_creation: {e}")
+        logger.error(f"Error decoding JSON from button value in cancel_creation_at_message_duplicates: {e}")
     except KeyError as e:
-        logger.error(f"Missing key in button value in handle_cancel_creation: {e}")
+        logger.error(f"Missing key in button value in cancel_creation_at_message_duplicates: {e}")
     except SlackApiError as e:
-        logger.error(f"Slack API error in handle_cancel_creation: {e.response['error']}")
+        logger.error(f"Slack API error in cancel_creation_at_message_duplicates: {e.response['error']}")
     except Exception as e:
-        logger.error(f"Unexpected error in handle_cancel_creation: {e}", exc_info=True) 
+        logger.error(f"Unexpected error in cancel_creation_at_message_duplicates: {e}", exc_info=True) 
