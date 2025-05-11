@@ -112,14 +112,14 @@ Do NOT use any subheadings (e.g., "Summary:", "Details:", "Steps to Reproduce:",
 Simply provide the refined description as a single block of text.
 
 Original Description:
-{original_description}
+{user_description}
 
 Respond with a JSON object with two keys: "suggested_title" and "refined_description".
 Ensure the JSON is well-formed. For example:
-{
+{{
   "suggested_title": "Example: User login fails with network error",
   "refined_description": "When a user attempts to log in, if there is a network interruption during the authentication process, the login attempt fails and an unclear error message is displayed. This issue was observed on version 1.2.3 of the web application during peak usage hours. The expected behavior is that the system should either retry the authentication or provide a clear error message indicating a network problem."
-}
+}}
 """
 
 PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """

@@ -1,5 +1,6 @@
 import logging
 import json
+import traceback
 from slack_sdk.errors import SlackApiError
 from utils.state_manager import conversation_states
 from services.genai_service import generate_ticket_title_and_description_from_text
@@ -159,29 +160,82 @@ def handle_generate_ai_ticket_details_after_duplicates(ack, body, client, logger
 
     try:
         action_value_str = body["actions"][0]["value"]
-        # Attempt to get thread_ts for logging from body if possible, before action_value is parsed
-        log_thread_ts = body.get("message", {}).get("thread_ts")
-        if not log_thread_ts and body.get("container"): # Fallback for modal submissions or other contexts
-            log_thread_ts = body["container"].get("thread_ts")
-        if not log_thread_ts: # Ultimate fallback
-            log_thread_ts = "N/A_see_action_value"
-
+        
+        # Robustly get thread_ts for logging, trying different locations in the body
+        log_thread_ts = "N/A_in_action_value_parsing" # Default if not found earlier
+        if body.get("message") and body["message"].get("thread_ts"):
+            log_thread_ts = body["message"]["thread_ts"]
+        elif body.get("container") and body["container"].get("thread_ts"):
+            log_thread_ts = body["container"]["thread_ts"]
+        
         logger.info(f"Thread {log_thread_ts}: Raw action_value string for handle_generate_ai_ticket_details_after_duplicates: {action_value_str}")
-        action_value = json.loads(action_value_str)
-        logger.info(f"Thread {log_thread_ts}: Parsed action_value keys: {list(action_value.keys())}")
-        # To avoid overly verbose logs, let's log specific important values or a truncated version if necessary.
-        # For now, let's assume the keys and the raw string are most critical for this specific KeyError.
-        # logger.info(f"Thread {log_thread_ts}: Full action_value content: {action_value}")
+        parsed_button_payload = json.loads(action_value_str)
+        logger.info(f"Thread {log_thread_ts}: Parsed button payload keys: {list(parsed_button_payload.keys())}")
 
-        user_raw_initial_description = action_value["initial_description"]
-        thread_ts = str(action_value["thread_ts"])
-        channel_id = str(action_value["channel_id"])
-        user_id = str(action_value["user_id"])
-        assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
+        # --- Accessing keys using .get() and checking for None ---
+        user_raw_initial_description = None
+        thread_ts_from_action = None
+        channel_id_from_action = None
+        user_id_from_action = None
+        critical_key_missing = False
 
-        # Check for pre-existing AI details from mention flow
-        pre_existing_title = action_value.get("pre_existing_ai_title")
-        pre_existing_description = action_value.get("pre_existing_ai_description")
+        try:
+            logger.info(f"Thread {log_thread_ts}: DEBUG: PRE-ACCESS parsed_button_payload.get('initial_description')")
+            user_raw_initial_description = parsed_button_payload.get("initial_description")
+            if user_raw_initial_description is None:
+                logger.error(f"Thread {log_thread_ts}: CRITICAL: 'initial_description' is None after get(). Payload keys: {list(parsed_button_payload.keys())}")
+                critical_key_missing = True
+            logger.info(f"Thread {log_thread_ts}: DEBUG: POST-ACCESS parsed_button_payload.get('initial_description') - Value: {user_raw_initial_description[:50] if user_raw_initial_description else 'None'}...")
+        except Exception as e_get_desc:
+            logger.error(f"Thread {log_thread_ts}: UNEXPECTED error during .get('initial_description'): {str(e_get_desc)}")
+            raise
+
+        try:
+            logger.info(f"Thread {log_thread_ts}: DEBUG: PRE-ACCESS parsed_button_payload.get('thread_ts')")
+            thread_ts_from_action = parsed_button_payload.get("thread_ts")
+            if thread_ts_from_action is None:
+                logger.error(f"Thread {log_thread_ts}: CRITICAL: 'thread_ts' is None after get(). Payload keys: {list(parsed_button_payload.keys())}")
+                critical_key_missing = True
+            logger.info(f"Thread {log_thread_ts}: DEBUG: POST-ACCESS parsed_button_payload.get('thread_ts') - Value: {thread_ts_from_action}")
+        except Exception as e_get_ts:
+            logger.error(f"Thread {log_thread_ts}: UNEXPECTED error during .get('thread_ts'): {str(e_get_ts)}")
+            raise
+
+        try:
+            logger.info(f"Thread {log_thread_ts}: DEBUG: PRE-ACCESS parsed_button_payload.get('channel_id')")
+            channel_id_from_action = parsed_button_payload.get("channel_id")
+            if channel_id_from_action is None:
+                logger.error(f"Thread {log_thread_ts}: CRITICAL: 'channel_id' is None after get(). Payload keys: {list(parsed_button_payload.keys())}")
+                critical_key_missing = True
+            logger.info(f"Thread {log_thread_ts}: DEBUG: POST-ACCESS parsed_button_payload.get('channel_id') - Value: {channel_id_from_action}")
+        except Exception as e_get_ch:
+            logger.error(f"Thread {log_thread_ts}: UNEXPECTED error during .get('channel_id'): {str(e_get_ch)}")
+            raise
+        
+        try:
+            logger.info(f"Thread {log_thread_ts}: DEBUG: PRE-ACCESS parsed_button_payload.get('user_id')")
+            user_id_from_action = parsed_button_payload.get("user_id")
+            if user_id_from_action is None:
+                logger.error(f"Thread {log_thread_ts}: CRITICAL: 'user_id' is None after get(). Payload keys: {list(parsed_button_payload.keys())}")
+                critical_key_missing = True
+            logger.info(f"Thread {log_thread_ts}: DEBUG: POST-ACCESS parsed_button_payload.get('user_id') - Value: {user_id_from_action}")
+        except Exception as e_get_uid:
+            logger.error(f"Thread {log_thread_ts}: UNEXPECTED error during .get('user_id'): {str(e_get_uid)}")
+            raise
+        
+        if critical_key_missing:
+            logger.error(f"Thread {log_thread_ts}: Aborting due to one or more critical keys missing from button payload.")
+            # Consider how to handle this - perhaps post an error message to the user?
+            return # Stop further processing
+
+        # Assign to function-scoped variables after successful retrieval and type conversion (if needed)
+        thread_ts = str(thread_ts_from_action) # Ensure string conversion
+        channel_id = str(channel_id_from_action) # Ensure string conversion
+        user_id = str(user_id_from_action) # Ensure string conversion
+        
+        assistant_id = str(parsed_button_payload.get("assistant_id")) if parsed_button_payload.get("assistant_id") else None
+        pre_existing_title = parsed_button_payload.get("pre_existing_ai_title")
+        pre_existing_description = parsed_button_payload.get("pre_existing_ai_description")
 
         if assistant_id:
             try:
@@ -196,8 +250,9 @@ def handle_generate_ai_ticket_details_after_duplicates(ack, body, client, logger
             ai_refined_description = pre_existing_description
         else:
             logger.info(f"Thread {thread_ts}: No pre-existing AI details found or they are incomplete. Proceeding with user's raw description for new AI generation: '{user_raw_initial_description[:100]}...'")
-            # Single call to GenAI service
+            logger.info(f"Thread {log_thread_ts}: DEBUG: About to call generate_ticket_title_and_description_from_text. Checking parsed_button_payload one last time: {list(parsed_button_payload.keys())}")
             ai_components = generate_ticket_title_and_description_from_text(user_raw_initial_description)
+            logger.info(f"Thread {log_thread_ts}: DEBUG: Successfully called generate_ticket_title_and_description_from_text.")
             suggested_title = ai_components.get("suggested_title", "Could not generate title")
             ai_refined_description = ai_components.get("refined_description", "Could not generate description. Original: " + user_raw_initial_description)
 
@@ -261,14 +316,14 @@ def handle_generate_ai_ticket_details_after_duplicates(ack, body, client, logger
         else:
             logger.error(f"Thread {thread_ts}: channel_id is None. Cannot post AI suggestions.")
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from button value in handle_generate_ai_ticket_details_after_duplicates: {e}")
-    except KeyError as e:
-        logger.error(f"Missing key in button value in handle_generate_ai_ticket_details_after_duplicates: {e}")
-    except SlackApiError as e:
-        logger.error(f"Slack API error in handle_generate_ai_ticket_details_after_duplicates: {e.response['error']}")
-    except Exception as e:
-        logger.error(f"Unexpected error in handle_generate_ai_ticket_details_after_duplicates: {e}", exc_info=True)
+    except json.JSONDecodeError as e_json: # Moved specific error type first
+        logger.error(f"Thread {log_thread_ts}: Error decoding JSON from button value in handle_generate_ai_ticket_details_after_duplicates: {e_json}")
+    except KeyError as e_key: # General KeyError if not caught by specific ones above
+        logger.info(f"Thread {log_thread_ts}: DEBUG: Caught by GENERAL KeyError: {str(e_key)}") # DEBUG PRINT
+        logger.error(f"Traceback for KeyError: {traceback.format_exc()}") # Log full traceback
+        logger.error(f"Thread {log_thread_ts}: General KeyError in handle_generate_ai_ticket_details_after_duplicates (should have been caught by specific handlers above if related to primary keys): {e_key}. This indicates an unexpected key issue. Actual key that failed: '{str(e_key)}'")
+    except Exception as e_exc:
+        logger.error(f"Unexpected error in handle_generate_ai_ticket_details_after_duplicates: {e_exc}", exc_info=True)
     finally:
         if assistant_id and thread_ts:
             try:

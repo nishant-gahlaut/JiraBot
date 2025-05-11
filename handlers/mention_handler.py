@@ -150,13 +150,11 @@ def post_summary_with_ctas(client, channel_id, thread_ts, summary: str, user_id:
     """
     logger.info(f"Posting summary and CTAs to channel {channel_id}, thread {thread_ts} for user {user_id} (context: {context_key_identifier})")
     
-    # Ensure summary is not excessively long for display or state
     display_summary = summary
     if len(summary) > 1000: # Arbitrary limit for display, actual state limit might be different
         logger.warning(f"Summary for CTA posting is very long ({len(summary)} chars), truncating for display.")
         display_summary = summary[:997] + "..."
 
-    # More specific key for state to avoid clashes if user is in multiple flows
     conversation_key = f"{channel_id}_{thread_ts}_{user_id}_{context_key_identifier}"
     
     conversation_states[conversation_key] = {
@@ -491,7 +489,7 @@ def handle_app_mention_event(event, client, logger_param, context):
     logger.info(f"Stored full mention context in conversation_states with key: {mention_context_key}. Title: {suggested_title}, Desc: {refined_description[:50] if refined_description else 'N/A'}...")
 
     # Now, decide what to do based on the intent
-    if intent == "create_ticket" or intent == "find_issues_and_create":
+    if intent == "CREATE_TICKET" or intent == "find_issues_and_create":
         # For creating a ticket, we'll use the contextual_summary as the basis for duplicate check
         # and then the suggested_title & refined_description to pre-fill the modal.
         # The CTA will carry the mention_context_key.
@@ -554,57 +552,60 @@ def handle_app_mention_event(event, client, logger_param, context):
         logger.warning(f"Unknown intent received from process_mention_and_generate_all_components: '{intent}'. Defaulting to UNCLEAR_INTENT behavior.")
         post_summary_with_ctas(client, channel_id, reply_thread_ts, contextual_summary, user_id, "mention_context_unknown_intent")
 
+# Function definitions start here
 
-# Adapting post_summary_with_ctas to take a pre-computed summary and a unique context key part
-def post_summary_with_ctas(client, channel_id, thread_ts, summary: str, user_id: str, context_key_identifier: str):
+def post_summary_and_final_ctas_for_mention(client, channel_id: str, thread_ts: str, summary_to_display: str, user_id: str, mention_context_key_for_cta: str, ai_suggested_title: str, ai_refined_description: str):
     """
-    Posts the summary and CTAs (Create Ticket, Find Similar Issues) to the thread.
-    Stores summary in conversation_states for CTA use with a more unique key.
+    Posts a confirmation message with AI-generated title and description,
+    and a button to open the pre-filled Jira creation modal.
+    Used when the intent is clearly CREATE_TICKET from a mention.
     """
-    logger.info(f"Posting summary and CTAs to channel {channel_id}, thread {thread_ts} for user {user_id} (context: {context_key_identifier})")
-    
-    # Ensure summary is not excessively long for display or state
-    display_summary = summary
-    if len(summary) > 1000: # Arbitrary limit for display, actual state limit might be different
-        logger.warning(f"Summary for CTA posting is very long ({len(summary)} chars), truncating for display.")
-        display_summary = summary[:997] + "..."
+    logger.info(f"Posting CREATE_TICKET confirmation for user {user_id} in thread {thread_ts}. Title: '{ai_suggested_title}'")
 
-    # More specific key for state to avoid clashes if user is in multiple flows
-    conversation_key = f"{channel_id}_{thread_ts}_{user_id}_{context_key_identifier}"
-    
-    conversation_states[conversation_key] = {
-        "summary": summary, # Store the full summary for backend use
-        "channel_id": channel_id, 
-        "user_id": user_id, 
-        "thread_ts": thread_ts, # This is the reply_thread_ts
-        "flow_context_key": conversation_key # Self-reference for clarity
+    button_value_payload = {
+        "title": ai_suggested_title,
+        "description": ai_refined_description,
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "user_id": user_id,
+        "summary_for_confirmation": summary_to_display
     }
-    logger.info(f"Stored mention context in conversation_states with key: {conversation_key}. Summary (original): {summary[:100]}...")
+    action_button_value_str = json.dumps(button_value_payload)
 
-    action_button_value = json.dumps({
-        "mention_context_key": conversation_key 
-    })
-    # Check length of action_button_value, though conversation_key should be manageable
-    if len(action_button_value) > 2000:
-         logger.error(f"Action button value for post_summary_with_ctas is too long: {len(action_button_value)}. Key: {conversation_key}")
-         # Fallback: don't send value, or send minimal key. This would break current CTA handlers.
-         # For now, assume it fits. This needs robust handling if keys become too long.
-         # A possible solution is to use a much shorter, perhaps hashed, key if this becomes an issue.
+    if len(action_button_value_str) > 2000:
+        logger.error(f"Button value for 'mention_confirm_open_create_form' is too long ({len(action_button_value_str)} chars). Truncating description.")
+        description_budget = 2000 - (len(action_button_value_str) - len(ai_refined_description)) - 50
+        if description_budget > 100:
+            button_value_payload["description"] = ai_refined_description[:description_budget] + "..."
+            action_button_value_str = json.dumps(button_value_payload)
+            logger.info(f"Truncated description. New button value length: {len(action_button_value_str)}")
+        else:
+            logger.error("Cannot safely truncate description to fit button value. Modal might not pre-fill correctly.")
 
     blocks = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"""<@{user_id}>, I've processed your request. Based on the context, here's a summary:
->>> {display_summary}"""
+                "text": f"""<@{user_id}>, I've processed your request to create a ticket. Here's what I've prepared based on our conversation (and the mention):"""
             }
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "What would you like to do next?"
+                "text": f"""*Suggested Ticket Title:*
+{ai_suggested_title}"""
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"""*Suggested Ticket Description:*
+```
+{ai_refined_description}
+```"""
             }
         },
         {
@@ -614,21 +615,26 @@ def post_summary_with_ctas(client, channel_id, thread_ts, summary: str, user_id:
                     "type": "button",
                     "text": {
                         "type": "plain_text",
-                        "text": "Create Ticket from this",
+                        "text": "Create Ticket with these Details",
                         "emoji": True
                     },
-                    "action_id": "mention_flow_create_ticket", # Reverted to original action_id
-                    "value": action_button_value 
+                    "style": "primary",
+                    "action_id": "mention_confirm_open_create_form",
+                    "value": action_button_value_str
                 },
                 {
                     "type": "button",
                     "text": {
                         "type": "plain_text",
-                        "text": "Find Similar Issues",
+                        "text": "Cancel",
                         "emoji": True
                     },
-                    "action_id": "mention_flow_find_issues", # Reverted to original action_id
-                    "value": action_button_value
+                    "action_id": "cancel_creation_at_message_duplicates",
+                    "value": json.dumps({
+                        "thread_ts": thread_ts,
+                        "user_id": user_id,
+                        "channel_id": channel_id
+                    })
                 }
             ]
         }
@@ -637,15 +643,15 @@ def post_summary_with_ctas(client, channel_id, thread_ts, summary: str, user_id:
     try:
         client.chat_postMessage(
             channel=channel_id,
-            thread_ts=thread_ts, 
+            thread_ts=thread_ts,
             blocks=blocks,
-            text=f"Summary: {display_summary}\nWhat would you like to do?" 
+            text=f"Jira Bot: Confirm Ticket Creation for '{ai_suggested_title}'"
         )
-        logger.info(f"Successfully posted summary and CTAs for context {context_key_identifier}.")
+        logger.info(f"Successfully posted 'Create Ticket' confirmation for mention in thread {thread_ts}.")
     except SlackApiError as e:
-        logger.error(f"Error posting summary and CTAs for {context_key_identifier}: {e}")
-    except Exception as e_gen: # Catch any other general errors
-        logger.error(f"Generic error in post_summary_with_ctas for {context_key_identifier}: {e_gen}", exc_info=True)
+        logger.error(f"Error posting 'Create Ticket' confirmation for mention: {e.response['error']}")
+    except Exception as e_gen:
+        logger.error(f"Generic error in post_summary_and_final_ctas_for_mention: {e_gen}", exc_info=True)
 
 # Remove or comment out the old summarize_conversation if no longer used directly by handle_app_mention_event
 # def summarize_conversation(conversation_history: str): ...
