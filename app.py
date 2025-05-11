@@ -39,7 +39,7 @@ from handlers.action_sequences.creation_handlers import (
     handle_create_ticket_action,
     handle_continue_after_ai,
     handle_modify_after_ai,
-    handle_proceed_to_ai_title_suggestion,
+    handle_generate_ai_ticket_details_after_duplicates,
     handle_cancel_creation_at_message_duplicates
     # handle_proceed_directly_to_modal_no_ai # This import will be an issue if the function is removed from creation_handlers.py
 )
@@ -220,9 +220,9 @@ def trigger_modify_after_ai(ack, body, client, logger):
     handle_modify_after_ai(ack, body, client, logger)
 
 # --- New Action Listeners for Duplicate Detection Flow ---
-@app.action("proceed_to_ai_title_suggestion")
-def trigger_proceed_to_ai_title(ack, body, client, logger):
-    handle_proceed_to_ai_title_suggestion(ack, body, client, logger)
+@app.action("generate_ai_ticket_details_after_duplicates_action")
+def trigger_generate_ai_ticket_details_after_duplicates(ack, body, client, logger):
+    handle_generate_ai_ticket_details_after_duplicates(ack, body, client, logger)
 
 @app.action("summarize_individual_duplicates_message_step")
 def trigger_summarize_individual_duplicates_msg_step(ack, body, client, logger):
@@ -397,13 +397,17 @@ def handle_mention_create_ticket_action(ack, body, client, logger):
     # The assistant_id for the orchestrator should be the one active during the mention, if available from context.
     # If not in mention_context, use the one from the button body as a fallback.
     assistant_id_for_orchestrator = assistant_id_from_body 
+    pre_existing_title = None # Initialize
+    pre_existing_description = None # Initialize
 
     if mention_context and "summary" in mention_context:
         bot_summary_as_description = mention_context["summary"]
+        pre_existing_title = mention_context.get("ai_suggested_title") # Retrieve pre-existing title
+        pre_existing_description = mention_context.get("ai_refined_description") # Retrieve pre-existing description
         original_user_id_for_context = mention_context.get("user_id", user_id_who_clicked) 
         # Prefer assistant_id from the stored context if available, as it's more likely tied to the original event
         assistant_id_for_orchestrator = mention_context.get("assistant_id", assistant_id_from_body)
-        logger.info(f"Retrieved bot summary for duplicate check: {bot_summary_as_description[:100]}... Original mention by {original_user_id_for_context}. Assistant ID for orchestrator: {assistant_id_for_orchestrator}")
+        logger.info(f"Retrieved bot summary for duplicate check: {bot_summary_as_description[:100]}... Original mention by {original_user_id_for_context}. Assistant ID for orchestrator: {assistant_id_for_orchestrator}. Pre-existing title: '{pre_existing_title}', Pre-existing desc (preview): '{pre_existing_description[:50] if pre_existing_description else 'N/A'}'")
     else:
         logger.error(f"Could not retrieve bot summary from conversation_states for key {actual_mention_context_key}. Cannot proceed with duplicate check.")
         try:
@@ -420,7 +424,9 @@ def handle_mention_create_ticket_action(ack, body, client, logger):
         thread_ts=thread_ts,
         user_id=original_user_id_for_context, 
         initial_description=bot_summary_as_description,
-        assistant_id=assistant_id_for_orchestrator 
+        assistant_id=assistant_id_for_orchestrator,
+        pre_existing_title=pre_existing_title,       # Pass pre_existing_title
+        pre_existing_description=pre_existing_description # Pass pre_existing_description
     )
     
     # Clean up the specific mention context state if it was successfully used

@@ -145,7 +145,7 @@ def handle_modify_after_ai(ack, body, client, logger):
     except Exception as e:
         logger.error(f"Error opening create ticket modal for modification: {e}")
 
-def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
+def handle_generate_ai_ticket_details_after_duplicates(ack, body, client, logger):
     """Handles the 'Proceed with this Description' button after duplicate check. 
        Uses a single LLM call to generate AI title AND AI refined description.
     """
@@ -158,14 +158,30 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
     user_id = None # Initialize user_id
 
     try:
-        action_value = json.loads(body["actions"][0]["value"])
+        action_value_str = body["actions"][0]["value"]
+        # Attempt to get thread_ts for logging from body if possible, before action_value is parsed
+        log_thread_ts = body.get("message", {}).get("thread_ts")
+        if not log_thread_ts and body.get("container"): # Fallback for modal submissions or other contexts
+            log_thread_ts = body["container"].get("thread_ts")
+        if not log_thread_ts: # Ultimate fallback
+            log_thread_ts = "N/A_see_action_value"
+
+        logger.info(f"Thread {log_thread_ts}: Raw action_value string for handle_generate_ai_ticket_details_after_duplicates: {action_value_str}")
+        action_value = json.loads(action_value_str)
+        logger.info(f"Thread {log_thread_ts}: Parsed action_value keys: {list(action_value.keys())}")
+        # To avoid overly verbose logs, let's log specific important values or a truncated version if necessary.
+        # For now, let's assume the keys and the raw string are most critical for this specific KeyError.
+        # logger.info(f"Thread {log_thread_ts}: Full action_value content: {action_value}")
+
         user_raw_initial_description = action_value["initial_description"]
         thread_ts = str(action_value["thread_ts"])
         channel_id = str(action_value["channel_id"])
         user_id = str(action_value["user_id"])
         assistant_id = str(action_value.get("assistant_id")) if action_value.get("assistant_id") else None
 
-        logger.info(f"Thread {thread_ts}: Proceeding with user's raw description: '{user_raw_initial_description[:100]}...'")
+        # Check for pre-existing AI details from mention flow
+        pre_existing_title = action_value.get("pre_existing_ai_title")
+        pre_existing_description = action_value.get("pre_existing_ai_description")
 
         if assistant_id:
             try:
@@ -174,11 +190,16 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             except Exception as e:
                 logger.error(f"Thread {thread_ts}: Error setting status before GenAI: {e}")
 
-        # Single call to GenAI service
-        ai_components = generate_ticket_title_and_description_from_text(user_raw_initial_description)
-        
-        suggested_title = ai_components.get("suggested_title", "Could not generate title")
-        ai_refined_description = ai_components.get("refined_description", "Could not generate description. Original: " + user_raw_initial_description)
+        if pre_existing_title and pre_existing_description:
+            logger.info(f"Thread {thread_ts}: Using pre-existing AI details from mention flow. Title: '{pre_existing_title}', Desc: '{pre_existing_description[:50]}...'")
+            suggested_title = pre_existing_title
+            ai_refined_description = pre_existing_description
+        else:
+            logger.info(f"Thread {thread_ts}: No pre-existing AI details found or they are incomplete. Proceeding with user's raw description for new AI generation: '{user_raw_initial_description[:100]}...'")
+            # Single call to GenAI service
+            ai_components = generate_ticket_title_and_description_from_text(user_raw_initial_description)
+            suggested_title = ai_components.get("suggested_title", "Could not generate title")
+            ai_refined_description = ai_components.get("refined_description", "Could not generate description. Original: " + user_raw_initial_description)
 
         # Check if generation failed (service methods return error strings in values)
         if "Could not generate title" in suggested_title or "Could not generate description" in ai_refined_description or \
@@ -241,13 +262,13 @@ def handle_proceed_to_ai_title_suggestion(ack, body, client, logger):
             logger.error(f"Thread {thread_ts}: channel_id is None. Cannot post AI suggestions.")
 
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from button value in handle_proceed_to_ai_title_suggestion: {e}")
+        logger.error(f"Error decoding JSON from button value in handle_generate_ai_ticket_details_after_duplicates: {e}")
     except KeyError as e:
-        logger.error(f"Missing key in button value in handle_proceed_to_ai_title_suggestion: {e}")
+        logger.error(f"Missing key in button value in handle_generate_ai_ticket_details_after_duplicates: {e}")
     except SlackApiError as e:
-        logger.error(f"Slack API error in handle_proceed_to_ai_title_suggestion: {e.response['error']}")
+        logger.error(f"Slack API error in handle_generate_ai_ticket_details_after_duplicates: {e.response['error']}")
     except Exception as e:
-        logger.error(f"Unexpected error in handle_proceed_to_ai_title_suggestion: {e}", exc_info=True)
+        logger.error(f"Unexpected error in handle_generate_ai_ticket_details_after_duplicates: {e}", exc_info=True)
     finally:
         if assistant_id and thread_ts:
             try:

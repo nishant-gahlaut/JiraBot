@@ -8,7 +8,7 @@ from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, bui
 
 logger = logging.getLogger(__name__)
 
-def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str, user_id: str, initial_description: str, assistant_id: str = None):
+def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str, user_id: str, initial_description: str, assistant_id: str = None, pre_existing_title: str = None, pre_existing_description: str = None):
     """
     Orchestrates the duplicate check process and presents results with standard CTAs.
 
@@ -19,6 +19,8 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
         user_id: The ID of the user who initiated the description/summary.
         initial_description: The text (user description or bot summary) to check for duplicates.
         assistant_id: Optional assistant ID for status updates.
+        pre_existing_title: Optional existing title for the ticket.
+        pre_existing_description: Optional existing description for the ticket.
     """
     logger.info(f"Thread {thread_ts}: Orchestrator - Starting duplicate check for user {user_id} with description: '{initial_description[:100]}...'")
 
@@ -41,7 +43,9 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
             "thread_ts": str(thread_ts),
             "channel_id": str(channel_id),
             "user_id": str(user_id),
-            "assistant_id": str(assistant_id) if assistant_id else None
+            "assistant_id": str(assistant_id) if assistant_id else None,
+            "pre_existing_ai_title": pre_existing_title,
+            "pre_existing_ai_description": pre_existing_description
         }
 
         blocks_for_duplicates = [
@@ -99,7 +103,7 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
 
         # Standardized main action buttons
         main_action_buttons = [
-            {"type": "button", "text": {"type": "plain_text", "text": "Continue Creating Ticket", "emoji": True}, "style": "primary", "action_id": "proceed_to_ai_title_suggestion", "value": json.dumps(button_context_value)},
+            {"type": "button", "text": {"type": "plain_text", "text": "Continue Creating Ticket", "emoji": True}, "style": "primary", "action_id": "generate_ai_ticket_details_after_duplicates_action", "value": json.dumps(button_context_value)},
             # {"type": "button", "text": {"type": "plain_text", "text": "Create Ticket Directly", "emoji": True}, "action_id": "proceed_directly_to_modal_no_ai", "value": json.dumps(button_context_value)},
             # For 'Refine Description', the action_id is 'refine_description_after_duplicates'. 
             # The text should be generic enough for both user description and bot summary contexts.

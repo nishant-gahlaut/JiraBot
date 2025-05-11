@@ -469,87 +469,42 @@ def handle_app_mention_event(event, client, logger_param, context):
 
     logger.info(f"GenAI processed mention: Intent='{intent}', Summary='{contextual_summary[:100]}...', Title='{suggested_title}', Desc provided: {bool(refined_description)}")
 
-    # 3. Implement logic based on intent
-    if intent == "CREATE_TICKET":
-        if suggested_title and refined_description:
-            # Store data for the modal opening action
-            action_value_payload = {
-                "user_id": user_id,
-                "channel_id": channel_id,
-                "thread_ts": reply_thread_ts, # original thread_ts where bot should reply or update
-                "original_message_ts": event.get("ts"), # TS of the user's message that triggered this
-                "title": suggested_title,
-                "description": refined_description,
-                "summary_for_confirmation": contextual_summary # For user to see what was understood
-            }
-            # Use a unique key for state if this needs to survive longer than button value
-            # For now, putting essentials in button value
-            
-            # TODO: Ensure this state key is unique and well-managed if using state_manager
-            # For now, passing via value, assuming it's not too large.
-            # If it's too large, will need to use state_manager with a unique key.
-            # Max length for action value is 2000 characters. JSON dump should be less.
-            action_value_str = json.dumps(action_value_payload)
-            if len(action_value_str) > 2000:
-                logger.warning("Action value for 'Confirm & Open Form' is too long. Consider using state_manager.")
-                # Fallback for now, or implement state storage here
-                # For simplicity, proceeding with potentially long value, Slack might truncate
-            
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"""<@{user_id}> I understood you want to create a ticket. I've prepared the following based on our conversation:
+    # Store these components in conversation_states using a unique key for this mention event
+    # This key will be passed in button values for subsequent actions to retrieve this context.
+    # Using a more robust key including user_id to prevent theoretical cross-talk if multiple users trigger mentions in same thread around same time.
+    # Though thread_ts is usually unique enough for a single interaction.
+    unique_event_id = event.get("event_ts", event.get("ts")) # A unique identifier for this specific mention event
+    mention_context_key = f"{channel_id}_{reply_thread_ts}_{user_id}_{unique_event_id}_mention_full_context"
+    
+    conversation_states[mention_context_key] = {
+        "intent": intent,
+        "summary": contextual_summary, # This is the contextual_summary from AI
+        "ai_suggested_title": suggested_title, # Storing the AI suggested title
+        "ai_refined_description": refined_description, # Storing the AI refined description
+        "user_id": user_id, # User who was mentioned / initiated
+        "channel_id": channel_id,
+        "thread_ts": reply_thread_ts, # Thread where bot will reply and subsequent actions happen
+        "original_message_ts": event.get("ts"), # TS of the actual mention message
+        "bot_user_id": bot_user_id, # Bot's own user ID
+        "assistant_id": context.get("assistant_id") # Assistant ID if available in this context
+    }
+    logger.info(f"Stored full mention context in conversation_states with key: {mention_context_key}. Title: {suggested_title}, Desc: {refined_description[:50] if refined_description else 'N/A'}...")
 
-*Title:* {suggested_title}
-*Description (preview):* {refined_description[:200]}...
-
-Would you like to open the ticket creation form with these details?"""
-                    }
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Confirm & Open Form",
-                                "emoji": True
-                            },
-                            "action_id": "mention_confirm_open_create_form", # New action ID
-                            "value": action_value_str,
-                             "style": "primary"
-                        },
-                        {
-                            "type": "button",
-                            "text": {
-                                "type": "plain_text",
-                                "text": "Cancel",
-                                "emoji": True
-                            },
-                            "action_id": "cancel_ticket_creation" # Re-use existing cancel if appropriate
-                        }
-                    ]
-                }
-            ]
-            try:
-                client.chat_postMessage(
-                    channel=channel_id,
-                    thread_ts=reply_thread_ts,
-                    blocks=blocks,
-                    text=f"Understood: Create Ticket. Title: {suggested_title}"
-                )
-            except SlackApiError as e:
-                logger.error(f"Error posting 'Confirm & Open Form' message: {e}")
-
-        else: # Title/description not good enough from LLM, fall back to standard CTAs with summary
-            logger.warning(f"Intent was CREATE_TICKET, but title/description was missing. Falling back to standard CTAs. Title: '{suggested_title}', Desc provided: {bool(refined_description)}")
-            # Fallback to post_summary_with_ctas using the contextual_summary from the LLM
-            # Ensure post_summary_with_ctas is adapted to take the summary directly
-            post_summary_with_ctas(client, channel_id, reply_thread_ts, contextual_summary, user_id, "mention_context_fallback_create")
-
+    # Now, decide what to do based on the intent
+    if intent == "create_ticket" or intent == "find_issues_and_create":
+        # For creating a ticket, we'll use the contextual_summary as the basis for duplicate check
+        # and then the suggested_title & refined_description to pre-fill the modal.
+        # The CTA will carry the mention_context_key.
+        post_summary_and_final_ctas_for_mention(
+            client=client, 
+            channel_id=channel_id, 
+            thread_ts=reply_thread_ts, 
+            summary_to_display=contextual_summary, # Summary to show the user
+            user_id=user_id, 
+            mention_context_key_for_cta=mention_context_key, # Key to retrieve all context including title/desc
+            ai_suggested_title=suggested_title, # Pass for potential direct use
+            ai_refined_description=refined_description # Pass for potential direct use
+        )
     elif intent == "FIND_SIMILAR_ISSUES":
         logger.info(f"Intent is FIND_SIMILAR_ISSUES. Using summary: {contextual_summary}")
         try:
