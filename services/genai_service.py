@@ -4,9 +4,19 @@ import logging
 import google.generativeai as genai # Import Google GenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 import json
+from typing import Optional, Dict, Any
+# tenacity is not used by the top-level functions, consider removing if GenAIService is fully gone
+# from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Import prompts
-from utils.prompts import GENERATE_TICKET_TITLE_PROMPT, GENERATE_TICKET_DESCRIPTION_PROMPT, GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT, GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT
+from utils.prompts import (
+    SUMMARIZE_SLACK_THREAD_PROMPT, # Added this import
+    GENERATE_TICKET_TITLE_PROMPT,
+    GENERATE_TICKET_DESCRIPTION_PROMPT,
+    GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT,
+    GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT,
+    PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +145,19 @@ def generate_jira_details(user_summary):
     #     }
     # --- End Actual GenAI Logic --- 
 
+# New top-level function for summarizing thread
+def summarize_thread(thread_content: str) -> Optional[str]:
+    if not thread_content or thread_content.isspace():
+        logger.warning("Thread content is empty for summarization. Returning None.")
+        return None
+    prompt = SUMMARIZE_SLACK_THREAD_PROMPT.format(thread_content=thread_content)
+    logger.info(f"Summarizing thread: '{thread_content[:100]}...'")
+    summary = generate_text(prompt)
+    if isinstance(summary, str) and summary.startswith("Error:"):
+        logger.error(f"Failed to summarize thread: {summary}")
+        return None # Or return the error string if preferred by callers
+    return summary
+
 def generate_suggested_title(user_description: str) -> str:
     """Generates a suggested Jira ticket title using an LLM."""
     if not user_description or user_description.isspace():
@@ -142,7 +165,7 @@ def generate_suggested_title(user_description: str) -> str:
         return "Title not generated (empty input)"
 
     prompt = GENERATE_TICKET_TITLE_PROMPT.format(user_description=user_description)
-    logger.info(f"Generating suggested title for description: '{user_description[:100]}...'")
+    logger.info(f"Generating suggested title for description: '{user_description[:100]}...'" )
     suggested_title = generate_text(prompt)
     # Basic cleaning: LLM might sometimes include the label like "Jira Ticket Title:"
     if "Jira Ticket Title:" in suggested_title:
@@ -159,7 +182,7 @@ def generate_refined_description(user_description: str) -> str:
         return "Description not generated (empty input)"
 
     prompt = GENERATE_TICKET_DESCRIPTION_PROMPT.format(user_description=user_description)
-    logger.info(f"Generating refined description for: '{user_description[:100]}...'")
+    logger.info(f"Generating refined description for: '{user_description[:100]}...'" )
     refined_description = generate_text(prompt)
     # Basic cleaning: LLM might sometimes include the label
     if "Refined Jira Ticket Description:" in refined_description:
@@ -183,7 +206,7 @@ def generate_ticket_components_from_thread(slack_thread_conversation: str) -> di
         }
 
     prompt = GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT.format(slack_thread_conversation=slack_thread_conversation)
-    logger.info(f"Generating ticket components from thread: '{slack_thread_conversation[:200]}...'")
+    logger.info(f"Generating ticket components from thread: '{slack_thread_conversation[:200]}...'" )
     
     raw_llm_output = generate_text(prompt)
 
@@ -223,7 +246,7 @@ def generate_ticket_components_from_thread(slack_thread_conversation: str) -> di
         return components
         
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
+        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'" )
         return {
             "thread_summary": "Error: Could not parse AI summary output.",
             "suggested_title": "Error: Could not parse AI title output.",
@@ -249,8 +272,8 @@ def generate_ticket_title_and_description_from_text(user_text: str) -> dict:
             "refined_description": "Could not generate description: Empty input."
         }
 
-    prompt = GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT.format(user_description=user_text)
-    logger.info(f"Generating ticket title and description from text: '{user_text[:200]}...'")
+    prompt = GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT.format(user_description=user_text) # Corrected to user_description to match prompt
+    logger.info(f"Generating ticket title and description from text: '{user_text[:200]}...'" )
     
     raw_llm_output = generate_text(prompt)
 
@@ -285,7 +308,7 @@ def generate_ticket_title_and_description_from_text(user_text: str) -> dict:
         return components
         
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
+        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'" )
         return {
             "suggested_title": "Error: Could not parse AI title output.",
             "refined_description": "Error: Could not parse AI description output. Raw LLM output was: " + raw_llm_output[:200] + "..."
@@ -296,3 +319,104 @@ def generate_ticket_title_and_description_from_text(user_text: str) -> dict:
             "suggested_title": f"Unexpected error: {e}",
             "refined_description": f"Unexpected error: {e}"
         }
+
+# New top-level function for processing mention and generating all components
+def process_mention_and_generate_all_components(user_direct_message_to_bot: str, formatted_conversation_history: str) -> Optional[Dict[str, Any]]:
+    prompt = PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT.format(
+        user_direct_message_to_bot=user_direct_message_to_bot,
+        formatted_conversation_history=formatted_conversation_history
+    )
+    logger.info(f"Processing mention and generating all components. User message: '{user_direct_message_to_bot[:100]}...', History: '{formatted_conversation_history[:100]}...'" )
+    
+    raw_llm_output = generate_text(prompt) # Use the Google GenAI model via generate_text
+
+    if isinstance(raw_llm_output, str) and raw_llm_output.startswith("Error:"):
+        logger.error(f"LLM call failed for mention processing: {raw_llm_output}")
+        # Return None or a dict with error, consistent with other functions
+        return {
+            "intent": None,
+            "contextual_summary": f"Error: {raw_llm_output}",
+            "suggested_title": None,
+            "refined_description": None
+        }
+
+    try:
+        cleaned_output = raw_llm_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[len("```json"):].strip()
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[len("```"):].strip()
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-len("```")].strip()
+        
+        logger.debug(f"Cleaned LLM output for JSON parsing (mention processing): {cleaned_output}")
+        parsed_json = json.loads(cleaned_output)
+        
+        # Validate expected keys
+        expected_keys = ["intent", "contextual_summary", "suggested_title", "refined_description"]
+        if not all(key in parsed_json for key in expected_keys):
+            logger.error(f"Missing one or more expected keys in parsed JSON (mention processing). Keys: {parsed_json.keys()}, Raw: {cleaned_output}")
+            # Allow partial data but log error, ensure all keys exist even if null
+            return {
+                "intent": parsed_json.get("intent"),
+                "contextual_summary": parsed_json.get("contextual_summary", "Error: Missing summary from AI response."),
+                "suggested_title": parsed_json.get("suggested_title"),
+                "refined_description": parsed_json.get("refined_description")
+            }
+        
+        logger.info("Successfully processed mention and generated all components.")
+        return parsed_json
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON from LLM (mention processing): {e}. Raw output: '{raw_llm_output[:500]}...'" )
+        return {
+            "intent": None,
+            "contextual_summary": "Error: Could not parse AI response for mention.",
+            "suggested_title": None,
+            "refined_description": None
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error during mention processing: {e}", exc_info=True)
+        return {
+            "intent": None,
+            "contextual_summary": f"Unexpected error: {e}",
+            "suggested_title": None,
+            "refined_description": None
+        }
+
+
+# Example usage (optional, for testing)
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+    # gen_ai_service = GenAIService() # Removed GenAIService instantiation
+
+    # Test summarize_thread
+    # summary = summarize_thread("This is a test thread. User is having trouble with login.")
+    # print(f"Summary: {summary}")
+
+    # Test generate_suggested_title
+    # title = generate_suggested_title("The application crashes when I click the submit button after filling the form.")
+    # print(f"Suggested Title: {title}")
+
+    # Test generate_refined_description
+    # description = generate_refined_description("The payment page is not loading. I tried multiple times. It just spins.")
+    # print(f"Refined Description: {description}")
+
+    # Test generate_ticket_components_from_thread
+    # thread_components = generate_ticket_components_from_thread("User A: The login is broken. User B: Yeah, I see a 500 error. User C: Happened after the deploy.")
+    # if thread_components:
+    #     print(f"Thread Components: Title: {thread_components.get('suggested_title')}, Description: {thread_components.get('refined_description')}")
+
+    # Test generate_ticket_title_and_description_from_text
+    # text_components = generate_ticket_title_and_description_from_text("My computer is making a weird buzzing sound and the screen is flickering. This started yesterday after the power surge.")
+    # if text_components:
+    #     print(f"Text Components: Title: {text_components.get('suggested_title')}, Description: {text_components.get('refined_description')}")
+
+    # Test process_mention_and_generate_all_components - now a top-level function call
+    mention_data = process_mention_and_generate_all_components(
+        user_direct_message_to_bot="@JiraBot I can't log in, the main page shows an error 500.",
+        formatted_conversation_history="UserA: Hey, did the new deployment go out? \nUserB: Yes, about an hour ago. \nUserC: I think something is wrong with the login page since then."
+    )
+    if mention_data and mention_data.get('intent'): # Check for successful processing
+        print(f"Mention Processed Data: Intent: {mention_data.get('intent')}, Summary: {mention_data.get('contextual_summary')}, Title: {mention_data.get('suggested_title')}, Description: {mention_data.get('refined_description')}")
+    else:
+        print(f"Failed to process mention data or intent was None. Response: {mention_data}")

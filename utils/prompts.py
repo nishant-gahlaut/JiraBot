@@ -105,18 +105,66 @@ JSON Output:
 """
 
 # Prompt for generating ticket title and description from a single user text input
-GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT = """You are an expert AI assistant helping to create a Jira ticket from a user's description.
-Based on the following user's initial description, provide two pieces of information:
-1.  A suggested, concise Jira ticket title that captures the main actionable issue or request.
-2.  A refined and structured Jira ticket description. This description should start with a 2-3 line overview of the core issue/request, and if the user's input implies multiple steps, tasks, or distinct points, list them as bullet points under the overview. If relevant, subtly incorporate general IT/software context if it enhances clarity, but do not invent specifics not hinted at by the user. Ensure the language is professional and clear. Do NOT use subheadings in the description output.
+GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT = """
+You are an expert Jira assistant. Given an original ticket description, generate a concise, informative Jira ticket title and a refined, structured Jira ticket description.
+The refined description should be suitable for a Jira ticket, well-organized, and easy to read. It should capture all key information from the original description.
+Do NOT use any subheadings (e.g., "Summary:", "Details:", "Steps to Reproduce:", "Expected Behavior:", "Actual Behavior:").
+Simply provide the refined description as a single block of text.
 
-Return these two items formatted as a single JSON object with the keys "suggested_title" and "refined_description".
-Do NOT include any prefixed labels like 'Title:' or 'Description:' within the *values* of these JSON fields. The values should be the direct text for each component.
+Original Description:
+{original_description}
 
-User's Initial Description:
---- BEGIN DESCRIPTION ---
-{user_description}
---- END DESCRIPTION ---
+Respond with a JSON object with two keys: "suggested_title" and "refined_description".
+Ensure the JSON is well-formed. For example:
+{
+  "suggested_title": "Example: User login fails with network error",
+  "refined_description": "When a user attempts to log in, if there is a network interruption during the authentication process, the login attempt fails and an unclear error message is displayed. This issue was observed on version 1.2.3 of the web application during peak usage hours. The expected behavior is that the system should either retry the authentication or provide a clear error message indicating a network problem."
+}
+"""
 
-JSON Output:
+PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """
+You are an intelligent Jira assistant integrated into Slack. You need to process a user's message to you, along with the recent conversation history from the channel/thread where you were mentioned, to understand the user's intent and extract relevant information for Jira ticket creation or issue searching.
+
+User's direct message to bot (this is the message that triggered the mention):
+"{user_direct_message_to_bot}"
+
+Formatted conversation history (last 20 messages, excluding the bot's own messages from this an other invocations, and the direct message already provided above):
+"{formatted_conversation_history}"
+
+Based on the user's direct message and the conversation history, determine the user's primary intent. The possible intents are:
+1.  "CREATE_TICKET": The user wants to create a new Jira ticket.
+2.  "FIND_SIMILAR_ISSUES": The user wants to find existing Jira tickets similar to their problem.
+3.  "UNCLEAR_INTENT": The user's intent is not clearly to create a ticket or find similar issues. It might be a general question, a comment, or something else.
+
+Then, regardless of the intent, provide the following:
+1.  `contextual_summary`: A concise summary of the conversation and the user's message. This summary will be used as context if the user wants to create a ticket or find similar issues. If the intent is `UNCLEAR_INTENT`, this summary helps in deciding the next step.
+2.  `suggested_title`: If the information is sufficient, suggest a Jira ticket title. If not, or if the intent is not `CREATE_TICKET`, this can be null or a very generic placeholder if some context is available.
+3.  `refined_description`: If the information is sufficient, suggest a refined Jira ticket description. This should be well-structured for a Jira ticket. If not, or if the intent is not `CREATE_TICKET`, this can be null.
+
+Respond with a JSON object containing these four keys: "intent", "contextual_summary", "suggested_title", and "refined_description".
+Ensure the JSON is well-formed.
+
+Example for CREATE_TICKET intent:
+{{
+  "intent": "CREATE_TICKET",
+  "contextual_summary": "The user reported that the login page is broken after the latest deployment. They are unable to access their account and see a 500 error. This is affecting multiple users.",
+  "suggested_title": "Login page broken after deployment - 500 error",
+  "refined_description": "Users are experiencing a 500 error on the login page following the recent deployment (v1.5.2). This prevents them from accessing their accounts. Issue seems to have started immediately after the deployment completed. Multiple users have confirmed this behavior across different browsers."
+}}
+
+Example for FIND_SIMILAR_ISSUES intent:
+{{
+  "intent": "FIND_SIMILAR_ISSUES",
+  "contextual_summary": "User is asking if there are any known issues with the payment gateway failing for VISA cards. They mentioned an error code 'ERR_PAY_003'.",
+  "suggested_title": null,
+  "refined_description": null
+}}
+
+Example for UNCLEAR_INTENT intent:
+{{
+  "intent": "UNCLEAR_INTENT",
+  "contextual_summary": "User mentioned 'the new dashboard looks great, but I think the colors are a bit off for the main KPI widget.' They also asked when the next release is planned.",
+  "suggested_title": null,
+  "refined_description": null
+}}
 """ 

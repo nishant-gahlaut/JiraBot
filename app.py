@@ -548,6 +548,68 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
         client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, user=user_id, text="Sorry, I encountered an error while searching for similar issues.")
 
 
+@app.action("mention_confirm_open_create_form")
+def handle_mention_confirm_open_create_form(ack, body, client, logger):
+    ack()
+    trigger_id = body["trigger_id"]
+    action_details_str = body["actions"][0]["value"]
+    user_id_who_clicked = body["user"]["id"]
+
+    try:
+        action_details = json.loads(action_details_str)
+        title = action_details.get("title")
+        description = action_details.get("description")
+        original_channel_id = action_details.get("channel_id")
+        original_thread_ts = action_details.get("thread_ts") # Where the bot should post confirmation after modal
+        # user_id_of_mentioner = action_details.get("user_id") # User who originally mentioned the bot
+        summary_for_confirmation = action_details.get("summary_for_confirmation")
+
+        logger.info(f"'mention_confirm_open_create_form' action by {user_id_who_clicked}. AI Title: '{title}', AI Desc (preview): '{description[:50]}...'")
+
+        if not title or not description:
+            logger.error("Missing title or description in action_details for mention_confirm_open_create_form.")
+            # Post an ephemeral message to the user who clicked
+            client.chat_postEphemeral(
+                channel=original_channel_id, # Post in the original channel
+                user=user_id_who_clicked,
+                thread_ts=original_thread_ts, # In the original thread context
+                text="Sorry, I couldn't retrieve the generated title or description to pre-fill the form. Please try the mention again."
+            )
+            return
+
+        # Prepare private_metadata for the modal
+        # This will be used by handle_modal_submission to know where to post the confirmation
+        private_metadata_payload = {
+            "channel_id": original_channel_id,
+            "thread_ts": original_thread_ts,
+            "user_id": user_id_who_clicked, # User who will be associated with ticket creation if not overridden in modal
+            "flow_origin": "mention_confirmed_create", # To identify the source
+            "ai_summary_for_context": summary_for_confirmation # If needed later
+        }
+        private_metadata_str = json.dumps(private_metadata_payload)
+        
+        # Store in conversation_states, as this seems to be the pattern for modal context
+        conversation_states[private_metadata_str] = private_metadata_payload
+        logger.info(f"Stored modal context for 'mention_confirm_open_create_form' in conversation_states with key: {private_metadata_str}")
+
+        modal_view = build_create_ticket_modal(
+            initial_summary=title,
+            initial_description=description,
+            private_metadata=private_metadata_str
+        )
+
+        client.views_open(trigger_id=trigger_id, view=modal_view)
+        logger.info(f"Opened Jira creation modal for user {user_id_who_clicked} (from mention flow) with pre-filled AI content.")
+
+    except json.JSONDecodeError as e_json:
+        logger.error(f"Failed to parse action_details JSON for 'mention_confirm_open_create_form': {e_json}. Value: {action_details_str}")
+        # Notify user of the error if possible (channel_id might not be available if JSON parsing fails catastrophically)
+    except SlackApiError as e_slack:
+        logger.error(f"Slack API error in 'mention_confirm_open_create_form': {e_slack.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in 'mention_confirm_open_create_form': {e}", exc_info=True)
+
+
 # --- View Handlers ---
 @app.view("create_ticket_modal_submission") # Changed from "create_ticket_modal" to match the modal's callback_id
 def handle_modal_submission(ack, body, client, view, logger):
