@@ -131,15 +131,21 @@ User's direct message to bot (this is the message that triggered the mention):
 Formatted conversation history (last 20 messages, excluding the bot's own messages from this an other invocations, and the direct message already provided above):
 "{formatted_conversation_history}"
 
-Based on the user's direct message and the conversation history, determine the user's primary intent. The possible intents are:
-1.  "CREATE_TICKET": The user wants to create a new Jira ticket.
-2.  "FIND_SIMILAR_ISSUES": The user wants to find existing Jira tickets similar to their problem.
-3.  "UNCLEAR_INTENT": The user's intent is not clearly to create a ticket or find similar issues. It might be a general question, a comment, or something else.
+**Determine User Intent (Based ONLY on User's Direct Message to Bot):**
+Critically analyze *only* the `user_direct_message_to_bot` to determine the user's primary intent. Do NOT use the `formatted_conversation_history` for this specific step of intent classification. The possible intents are:
+1.  "CREATE_TICKET": The user's direct message explicitly states they want to *create*, *log*, *file*, or *raise* a new Jira ticket, or uses very strong imperative language directed at the bot to record the issue (e.g., '@JiraBot, record this problem: ...'). Simply describing a problem, without a clear call to create a ticket, might not be enough for this intent.
+2.  "FIND_SIMILAR_ISSUES": The user's direct message explicitly asks to *find*, *search for*, *check for existing*, or *look up* similar Jira tickets, or asks questions like 'Are there any tickets for...?' or 'Do we have an issue logged for...?'.
+3.  "UNCLEAR_INTENT": The user's direct message does not contain explicit phrases for creating a ticket or finding similar issues. This includes messages where the user is only describing a problem, asking a general question not related to ticket creation/searching, making a comment, or if the intent is ambiguous.
 
-Then, regardless of the intent, provide the following:
-1.  `contextual_summary`: A concise summary of the conversation and the user's message. This summary will be used as context if the user wants to create a ticket or find similar issues. If the intent is `UNCLEAR_INTENT`, this summary helps in deciding the next step.
-2.  `suggested_title`: If the information is sufficient, suggest a Jira ticket title. If not, or if the intent is not `CREATE_TICKET`, this can be null or a very generic placeholder if some context is available.
-3.  `refined_description`: If the information is sufficient, suggest a refined Jira ticket description. This should be well-structured for a Jira ticket. If not, or if the intent is not `CREATE_TICKET`, this can be null.
+**Important Instruction on History Relevance (for other components like summary, title, description):**
+When generating the `contextual_summary`, `suggested_title`, and `refined_description`, you should then critically evaluate if the `formatted_conversation_history` is directly pertinent to the `user_direct_message_to_bot`.
+- If the history is highly relevant and provides useful context, integrate it appropriately into these *other* components.
+- **If the `formatted_conversation_history` appears to discuss unrelated topics, you MUST primarily base `suggested_title` and `refined_description` on the information present in the `user_direct_message_to_bot`.** The `contextual_summary` in such a case should still summarize the user's direct message, and can optionally acknowledge that prior history was not directly related if you deem it useful for clarity.
+
+Then, using the intent derived *solely* from the direct message, and considering the history relevance for other components, provide the following:
+1.  `contextual_summary`: A concise summary of the conversation and the user's message, considering the history relevance instruction above.
+2.  `suggested_title`: If the information (prioritizing the user's direct message if history is unrelated for this component) is sufficient, suggest a Jira ticket title. If not, or if the intent is not `CREATE_TICKET`, this can be null.
+3.  `refined_description`: If the information (prioritizing the user's direct message if history is unrelated for this component) is sufficient, suggest a refined Jira ticket description. This should be well-structured for a Jira ticket. If not, or if the intent is not `CREATE_TICKET`, this can be null.
 
 Respond with a JSON object containing these four keys: "intent", "contextual_summary", "suggested_title", and "refined_description".
 Ensure the JSON is well-formed.
