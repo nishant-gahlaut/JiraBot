@@ -773,25 +773,25 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
 if __name__ == "__main__":
     try:
         # Scrape Jira tickets from the specified project
-        # project_key_to_scrape = os.environ.get("JIRA_PROJECT_KEY_TO_SCRAPE")
-        # if project_key_to_scrape:
-        #     logger.info(f"Starting Jira scrape for project: {project_key_to_scrape} for up to 200 tickets...")
-        #     # Parameters: project_key, total_tickets_to_scrape, api_batch_size
-        #     scraped_count, total_available = scrape_and_store_tickets(
-        #         project_key=project_key_to_scrape, 
-        #         total_tickets_to_scrape=200, # Changed from 2000 to 200
-        #         api_batch_size=100
-        #     )
-        #     logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
+        project_key_to_scrape = os.environ.get("JIRA_PROJECT_KEY_TO_SCRAPE")
+        if project_key_to_scrape:
+            logger.info(f"Starting Jira scrape for project: {project_key_to_scrape} for up to 200 tickets...")
+            # Parameters: project_key, total_tickets_to_scrape, api_batch_size
+            scraped_count, total_available = scrape_and_store_tickets(
+                project_key=project_key_to_scrape, 
+                total_tickets_to_scrape=50, # Changed from 2000 to 200
+                api_batch_size=100
+            )
+            logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
 
-        #     if scraped_count > 0:
-        #         logger.info("Proceeding to Pinecone ingestion pipeline...")
-        #         run_ingestion_pipeline() # Call the ingestion pipeline
-        #     else:
-        #         logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
+            if scraped_count > 0:
+                logger.info("Proceeding to Pinecone ingestion pipeline...")
+                run_ingestion_pipeline() # Call the ingestion pipeline
+            else:
+                logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
 
-        # else:
-        #     logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping and Pinecone ingestion on startup.")
+        else:
+            logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping and Pinecone ingestion on startup.")
 
         logger.info("Starting Socket Mode Handler...")
         # Use SocketModeHandler for development/testing without exposing a public URL

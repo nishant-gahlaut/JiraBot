@@ -50,127 +50,128 @@ Provide a detailed but concise summary.
 """
 
 # New prompt for summarizing a Slack conversation thread
-SUMMARIZE_SLACK_THREAD_PROMPT = """You are an expert assistant tasked with summarizing a Slack thread conversation. 
-The conversation history is provided below, with each message prefixed by the user who sent it. 
-Messages are ordered from oldest to newest.
-Provide a concise summary (2-3 sentences) of the main topics discussed and any potential action items or questions raised.
+SUMMARIZE_SLACK_THREAD_PROMPT = """
+Summarize the following Slack thread conversation concisely. Focus on the main topic, any problems raised, and proposed solutions or next steps mentioned. Extract the core information relevant for understanding the situation quickly.
 
-Conversation History:
-{conversation_history}
+Conversation:
+---
+{thread_content}
+---
 
 Concise Summary:"""
 
 # Prompt for generating a concise Jira ticket title from user description
-GENERATE_TICKET_TITLE_PROMPT = """You are an expert technical writer. Based on the following user description of an issue or request, 
-craft a clear, concise, and informative Jira ticket title. The title should be a single line and accurately reflect the core problem or task.
+GENERATE_TICKET_TITLE_PROMPT = """
+Based on the following Jira ticket description, generate a concise and informative Jira Ticket Title (max 15 words).
 
-User Description:
-'''{user_description}'''
+Description:
+---
+{user_description}
+---
 
 Jira Ticket Title:"""
 
 # Prompt for generating a refined Jira ticket description
-GENERATE_TICKET_DESCRIPTION_PROMPT = """You are an expert technical writer creating a Jira ticket description. 
-Based on the user's initial description, generate a refined and structured ticket description suitable for a Jira ticket.
+GENERATE_TICKET_DESCRIPTION_PROMPT = """
+Refine the following user-provided description into a well-structured Jira ticket description. Ensure clarity, include relevant details if mentioned, and format it appropriately for a Jira ticket. If the input is very short, expand slightly to make it a useful description.
 
-Follow these guidelines for the description:
-- Begin with a 2-3 line concise overview of the core issue or request.
-- If the user's input suggests multiple steps, tasks, or distinct points, present these as bullet points following the overview.
-- If relevant and inferable, you can subtly incorporate general context about common IT/software development environments, backend systems, or tech stacks to enhance clarity. Do not invent specific technical details not hinted at by the user.
-- Ensure the language is professional and clear for a development team.
-- Do NOT include any prefixed labels like 'Summary:', 'Overview:', 'Bullet Points:', or 'Details:' in your output. Provide only the refined description text itself.
+User Description:
+---
+{user_description}
+---
 
-User's Initial Description:
-'''{user_description}'''
+Refined Jira Ticket Description:"""
 
-Refined Jira Ticket Description (direct output):
-"""
+# Prompt for generating Title and Description in one go (JSON output)
+GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT = """
+Analyze the user description below. Generate a concise Jira ticket title and a refined, detailed Jira ticket description. 
+Output *only* a valid JSON object with the keys "suggested_title" and "refined_description".
 
-# Prompt for generating all ticket components (summary, title, description) from a Slack thread
-GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT = """You are an expert AI assistant analyzing a Slack thread to help create a Jira ticket.
-Based on the following Slack thread conversation, provide three pieces of information:
-1.  A concise overall summary of the entire thread's discussion (2-4 sentences).
-2.  A suggested, concise Jira ticket title that captures the main actionable issue or request from the thread.
-3.  A refined and structured Jira ticket description. This description should start with a 2-3 line overview of the core issue/request identified from the thread, and if the thread implies multiple steps, tasks, or distinct points, list them as bullet points under the overview. If relevant, subtly incorporate general IT/software context if it enhances clarity, but do not invent specifics.
+User Description:
+---
+{user_description}
+---
 
-Return these three items formatted as a single JSON object with the keys "thread_summary", "suggested_title", and "refined_description".
-Do NOT include any prefixed labels like 'Summary:', 'Title:', 'Description:' within the *values* of these JSON fields. The values should be the direct text for each component.
+JSON Output:"""
+
+# Prompt for generating Summary, Title, and Description from a thread (JSON output)
+GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT = """
+Analyze the following Slack thread conversation. Generate a concise summary of the thread, a suggested Jira ticket title, and a refined Jira ticket description based on the conversation. 
+Focus the title and description on the primary issue or task discussed.
+Output *only* a valid JSON object with the keys "thread_summary", "suggested_title", and "refined_description".
 
 Slack Thread Conversation:
---- BEGIN THREAD ---
+---
 {slack_thread_conversation}
---- END THREAD ---
+---
 
-JSON Output:
-"""
+JSON Output:"""
 
-# Prompt for generating ticket title and description from a single user text input
-GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT = """
-You are an expert Jira assistant. Given an original ticket description, generate a concise, informative Jira ticket title and a refined, structured Jira ticket description.
-The refined description should be suitable for a Jira ticket, well-organized, and easy to read. It should capture all key information from the original description.
-Do NOT use any subheadings (e.g., "Summary:", "Details:", "Steps to Reproduce:", "Expected Behavior:", "Actual Behavior:").
-Simply provide the refined description as a single block of text.
-
-Original Description:
-{user_description}
-
-Respond with a JSON object with two keys: "suggested_title" and "refined_description".
-Ensure the JSON is well-formed. For example:
-{{
-  "suggested_title": "Example: User login fails with network error",
-  "refined_description": "When a user attempts to log in, if there is a network interruption during the authentication process, the login attempt fails and an unclear error message is displayed. This issue was observed on version 1.2.3 of the web application during peak usage hours. The expected behavior is that the system should either retry the authentication or provide a clear error message indicating a network problem."
-}}
-"""
-
+# Prompt for processing a mention, understanding intent, and generating components (JSON output)
 PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """
-You are an intelligent Jira assistant integrated into Slack. You need to process a user's message to you, along with the recent conversation history from the channel/thread where you were mentioned, to understand the user's intent and extract relevant information for Jira ticket creation or issue searching.
+Analyze the user's direct message to the bot and the recent conversation history provided below.
+Determine the user's primary intent (e.g., 'create_ticket', 'find_similar_tickets', 'clarification', 'unrelated').
+Generate a concise contextual summary based on the direct message and history.
+If the intent seems to be 'create_ticket' or involves describing a problem, generate a suggested Jira ticket title and a refined Jira ticket description.
+Output *only* a valid JSON object containing:
+- "intent": The determined user intent string.
+- "contextual_summary": A brief summary of the conversation context.
+- "suggested_title": A relevant Jira ticket title (or null/empty if intent is not creation-related).
+- "refined_description": A detailed Jira ticket description (or null/empty if intent is not creation-related).
 
-User's direct message to bot (this is the message that triggered the mention):
-"{user_direct_message_to_bot}"
+User Direct Message to Bot:
+---
+{user_direct_message_to_bot}
+---
 
-Formatted conversation history (last 20 messages, excluding the bot's own messages from this an other invocations, and the direct message already provided above):
-"{formatted_conversation_history}"
+Recent Conversation History:
+---
+{formatted_conversation_history}
+---
 
-**Determine User Intent (Based ONLY on User's Direct Message to Bot):**
-Critically analyze *only* the `user_direct_message_to_bot` to determine the user's primary intent. Do NOT use the `formatted_conversation_history` for this specific step of intent classification. The possible intents are:
-1.  "CREATE_TICKET": The user's direct message explicitly states they want to *create*, *log*, *file*, or *raise* a new Jira ticket, or uses very strong imperative language directed at the bot to record the issue (e.g., '@JiraBot, record this problem: ...'). Simply describing a problem, without a clear call to create a ticket, might not be enough for this intent.
-2.  "FIND_SIMILAR_ISSUES": The user's direct message explicitly asks to *find*, *search for*, *check for existing*, or *look up* similar Jira tickets, or asks questions like 'Are there any tickets for...?' or 'Do we have an issue logged for...?'.
-3.  "UNCLEAR_INTENT": The user's direct message does not contain explicit phrases for creating a ticket or finding similar issues. This includes messages where the user is only describing a problem, asking a general question not related to ticket creation/searching, making a comment, or if the intent is ambiguous.
+JSON Output:"""
 
-**Important Instruction on History Relevance (for other components like summary, title, description):**
-When generating the `contextual_summary`, `suggested_title`, and `refined_description`, you should then critically evaluate if the `formatted_conversation_history` is directly pertinent to the `user_direct_message_to_bot`.
-- If the history is highly relevant and provides useful context, integrate it appropriately into these *other* components.
-- **If the `formatted_conversation_history` appears to discuss unrelated topics, you MUST primarily base `suggested_title` and `refined_description` on the information present in the `user_direct_message_to_bot`.** The `contextual_summary` in such a case should still summarize the user's direct message, and can optionally acknowledge that prior history was not directly related if you deem it useful for clarity.
+# Prompt for generating a concise problem statement for embedding
+GENERATE_CONCISE_PROBLEM_STATEMENT_PROMPT = """
+Analyze the following Jira ticket information. Focus *only* on the core problem being reported or the primary task requested.
+Generate a concise summary of the problem/task in {max_lines_lower_bound} to {max_lines} lines. 
+Prioritize information from the summary and description. Only use comments if the summary and description are insufficient to understand the core problem/task. 
+Do not include greetings, author names, solutions, questions asking for more info, ticket IDs, specific user IDs/data blobs, or status updates. 
+Output only the concise problem/task description.
 
-Then, using the intent derived *solely* from the direct message, and considering the history relevance for other components, provide the following:
-1.  `contextual_summary`: A concise summary of the conversation and the user's message, considering the history relevance instruction above.
-2.  `suggested_title`: If the information (prioritizing the user's direct message if history is unrelated for this component) is sufficient, suggest a Jira ticket title. If not, or if the intent is not `CREATE_TICKET`, this can be null.
-3.  `refined_description`: If the information (prioritizing the user's direct message if history is unrelated for this component) is sufficient, suggest a refined Jira ticket description. This should be well-structured for a Jira ticket. If not, or if the intent is not `CREATE_TICKET`, this can be null.
+Ticket Information:
+---
+Ticket Summary:
+{summary}
 
-Respond with a JSON object containing these four keys: "intent", "contextual_summary", "suggested_title", and "refined_description".
-Ensure the JSON is well-formed.
+Ticket Description:
+{description}
 
-Example for CREATE_TICKET intent:
-{{
-  "intent": "CREATE_TICKET",
-  "contextual_summary": "The user reported that the login page is broken after the latest deployment. They are unable to access their account and see a 500 error. This is affecting multiple users.",
-  "suggested_title": "Login page broken after deployment - 500 error",
-  "refined_description": "Users are experiencing a 500 error on the login page following the recent deployment (v1.5.2). This prevents them from accessing their accounts. Issue seems to have started immediately after the deployment completed. Multiple users have confirmed this behavior across different browsers."
-}}
+Relevant Comments (Use only if summary/description are unclear):
+{comments}
+---
 
-Example for FIND_SIMILAR_ISSUES intent:
-{{
-  "intent": "FIND_SIMILAR_ISSUES",
-  "contextual_summary": "User is asking if there are any known issues with the payment gateway failing for VISA cards. They mentioned an error code 'ERR_PAY_003'.",
-  "suggested_title": null,
-  "refined_description": null
-}}
+Concise Problem/Task Statement ({max_lines_lower_bound}-{max_lines} lines):"""
 
-Example for UNCLEAR_INTENT intent:
-{{
-  "intent": "UNCLEAR_INTENT",
-  "contextual_summary": "User mentioned 'the new dashboard looks great, but I think the colors are a bit off for the main KPI widget.' They also asked when the next release is planned.",
-  "suggested_title": null,
-  "refined_description": null
-}}
-""" 
+# Prompt for generating concise problem statements for a BATCH of tickets
+GENERATE_CONCISE_PROBLEM_STATEMENTS_BATCH_PROMPT = """
+You are an AI assistant tasked with summarizing the core problem for a batch of Jira tickets, using ONLY the summary and description provided.
+Input is a JSON list of ticket objects, each containing 'id', 'summary', and 'description'.
+Analyze each ticket object in the input list ({batch_size} tickets total).
+For *each* ticket, generate a concise summary (problem statement) of the core problem/task in {max_lines_lower_bound} to {max_lines} lines, following these rules:
+- Base the summary *strictly* on the provided summary and description.
+- Focus primarily on the core problem being reported or the primary task requested, but include essential context from the summary/description if necessary to understand the issue clearly.
+- Do NOT use any information outside of the provided summary and description for each ticket.
+- Do NOT include greetings, author names, solutions, questions asking for more info, ticket IDs, user IDs/data blobs, or status updates in the output statements.
+
+Input JSON list of tickets:
+```json
+{batch_input_json}
+```
+
+Output *only* a valid JSON list of strings. The list should contain exactly {batch_size} strings.
+Each string in the output list must be the concise problem statement (based on summary/description) for the corresponding ticket in the input list, maintaining the original order.
+Example output format for a batch of 2:
+["Concise problem statement for first ticket based on its summary/desc.", "Concise problem statement for second ticket based on its summary/desc."]
+
+JSON Output list of concise problem statements:""" 

@@ -4,7 +4,7 @@ import logging
 import google.generativeai as genai # Import Google GenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 # tenacity is not used by the top-level functions, consider removing if GenAIService is fully gone
 # from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -15,7 +15,9 @@ from utils.prompts import (
     GENERATE_TICKET_DESCRIPTION_PROMPT,
     GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT,
     GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT,
-    PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT
+    PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT,
+    GENERATE_CONCISE_PROBLEM_STATEMENT_PROMPT,
+    GENERATE_CONCISE_PROBLEM_STATEMENTS_BATCH_PROMPT # ADDED IMPORT
 )
 
 logger = logging.getLogger(__name__)
@@ -383,6 +385,175 @@ def process_mention_and_generate_all_components(user_direct_message_to_bot: str,
             "refined_description": None
         }
 
+def generate_concise_problem_statement(summary: str, description: str, comments: str, max_lines: int = 7) -> str:
+    """
+    Uses an LLM (Google Flash via LangChain) to generate a concise problem statement (5-7 lines) 
+    from Jira ticket details, prioritizing summary and description.
+
+    Args:
+        summary: The cleaned summary of the Jira ticket.
+        description: The cleaned description of the Jira ticket.
+        comments: The cleaned and filtered comments relevant to the problem.
+        max_lines: The target maximum number of lines for the output.
+
+    Returns:
+        A string containing the concise problem statement, or an error message 
+        if generation fails.
+    """
+    llm = get_llm() # Get the configured LangChain LLM instance
+    if not llm:
+        logger.error("Cannot generate problem statement: LLM instance is not available.")
+        # Return a fallback or error indicator
+        fallback_text = f"Fallback (LLM unavailable): {summary}"
+        return fallback_text[:500] # Limit fallback length
+
+    # Combine inputs, potentially indicating priority or source
+    # If comments are very long, consider truncating them for the prompt
+    # Ensure inputs are strings
+    summary_str = str(summary) if summary is not None else ""
+    description_str = str(description) if description is not None else ""
+    comments_str = str(comments) if comments is not None else ""
+    
+    # Limit comments length passed to the prompt
+    max_comment_length = 2000
+    if len(comments_str) > max_comment_length:
+        comments_str = comments_str[:max_comment_length] + "... (truncated)"
+
+    # Format the prompt using the imported constant
+    prompt = GENERATE_CONCISE_PROBLEM_STATEMENT_PROMPT.format(
+        summary=summary_str,
+        description=description_str,
+        comments=comments_str,
+        max_lines=max_lines,
+        max_lines_lower_bound=max_lines - 1
+    )
+
+    try:
+        # Use the LangChain LLM's invoke method
+        logger.debug(f"Invoking LLM for problem statement. Prompt length: {len(prompt)}")
+        response = llm.invoke(prompt)
+        
+        # LangChain ChatGoogleGenerativeAI typically returns an AIMessage with content attribute
+        generated_text = response.content if hasattr(response, 'content') else str(response)
+        
+        if not generated_text or generated_text.isspace():
+             logger.warning("LLM returned empty response for problem statement.")
+             raise ValueError("LLM returned empty response")
+             
+        # Simple post-processing: ensure it's roughly within line limits (optional)
+        lines = generated_text.strip().split('\n')
+        if len(lines) > max_lines:
+            logger.debug(f"LLM output ({len(lines)} lines) exceeded max_lines ({max_lines}). Truncating.")
+            generated_text = "\n".join(lines[:max_lines])
+            
+        logger.info(f"Successfully generated problem statement (length: {len(generated_text)} chars).")
+        return generated_text.strip()
+
+    except Exception as e:
+        logger.error(f"Error generating problem statement with LLM: {e}", exc_info=True)
+        # Return a fallback or error indicator
+        fallback_text = f"Error: Could not generate problem statement. Fallback: {summary_str}"
+        return fallback_text[:500] # Limit fallback length
+
+# --- NEW BATCH FUNCTION --- 
+def generate_concise_problem_statements_batch(batch_data: List[Dict[str, Any]], max_lines: int = 7) -> List[str]:
+    """
+    Uses an LLM to generate concise problem statements for a batch of tickets.
+
+    Args:
+        batch_data: A list of dictionaries, where each dict represents a ticket
+                    and must contain 'id' (unique identifier like index or ticket_id),
+                    'summary', 'description', and 'comments'.
+        max_lines: The target maximum number of lines for each problem statement.
+
+    Returns:
+        A list of strings. Each string is either the generated problem statement
+        or an error message (e.g., "Error: Failed to generate for item <id>")
+        corresponding to the input batch order.
+    """
+    llm = get_llm()
+    if not llm:
+        logger.error("Cannot generate batch problem statements: LLM instance not available.")
+        return [f"Error: LLM unavailable for item {item.get('id', 'N/A')}" for item in batch_data]
+        
+    if not batch_data:
+        logger.warning("Received empty batch_data for problem statement generation.")
+        return []
+
+    batch_size = len(batch_data)
+    
+    # Pre-process batch data for prompt (e.g., truncate long comments)
+    # IMPORTANT: Create a copy to avoid modifying the original data if passed by reference elsewhere
+    prepared_batch_data = []
+    for item in batch_data:
+        prepared_batch_data.append({
+            "id": item.get('id', 'N/A'), # Keep ID for potential error reporting
+            "summary": str(item.get('summary', '')),
+            "description": str(item.get('description', ''))
+        })
+
+    try:
+        # Serialize the prepared batch data to a JSON string for the prompt
+        # Use ensure_ascii=False to handle potential non-ASCII chars better if needed, but check LLM tolerance
+        batch_input_json = json.dumps(prepared_batch_data, indent=2, ensure_ascii=True)
+    except Exception as e:
+        logger.error(f"Failed to serialize batch data to JSON: {e}", exc_info=True)
+        return [f"Error: Failed to prepare batch input for item {item.get('id', 'N/A')}" for item in batch_data]
+        
+    # Format the prompt
+    prompt = GENERATE_CONCISE_PROBLEM_STATEMENTS_BATCH_PROMPT.format(
+        batch_input_json=batch_input_json,
+        batch_size=batch_size,
+        max_lines=max_lines,
+        max_lines_lower_bound=2
+    )
+
+    # Estimate token count - very rough, use a proper tokenizer if needed
+    prompt_token_estimate = len(prompt) // 3 # Rough estimate
+    logger.debug(f"Invoking LLM for batch problem statements. Batch Size: {batch_size}. Prompt Token Estimate: ~{prompt_token_estimate}")
+    # Adjust threshold based on the specific model's context window (e.g., Gemini 1.5 Flash is large, but use a safer limit)
+    if prompt_token_estimate > 80000: # Example Threshold (adjust based on model limits)
+         logger.warning(f"Potential high token count ({prompt_token_estimate}) for batch LLM call. Consider reducing LLM_BATCH_SIZE or further input truncation.")
+
+    raw_llm_output = "Error: LLM Invocation Failed Initially" # Default error
+    try:
+        response = llm.invoke(prompt)
+        raw_llm_output = response.content if hasattr(response, 'content') else str(response)
+
+        # Clean potential markdown code block wrappers
+        cleaned_output = raw_llm_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[len("```json"):].strip()
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[len("```"):].strip()
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-len("```")].strip()
+            
+        logger.debug(f"Cleaned LLM batch output for JSON parsing: {cleaned_output[:200]}...")
+
+        # Parse the JSON list response
+        results = json.loads(cleaned_output)
+
+        if not isinstance(results, list):
+            logger.error(f"LLM batch output was not a list. Type: {type(results)}. Output: {cleaned_output[:500]}...")
+            raise ValueError("LLM output for batch was not a list.")
+
+        if len(results) != batch_size:
+            logger.error(f"LLM batch output list size mismatch. Expected: {batch_size}, Got: {len(results)}. Output: {cleaned_output[:500]}...")
+            # For safety, return errors for all items in this batch
+            return [f"Error: LLM output size mismatch for item {item.get('id', 'N/A')}" for item in batch_data]
+            
+        # Optional: Post-process each result (e.g., strip extra whitespace)
+        processed_results = [str(res).strip() for res in results]
+        logger.info(f"Successfully generated and parsed {len(processed_results)} problem statements from batch LLM call.")
+        return processed_results
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode LLM batch output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
+        return [f"Error: Failed to parse LLM JSON output for item {item.get('id', 'N/A')}" for item in batch_data]
+    except Exception as e:
+        logger.error(f"Error during LLM batch invocation or processing: {e}", exc_info=True)
+        return [f"Error: LLM invocation/processing failed for item {item.get('id', 'N/A')}" for item in batch_data]
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
