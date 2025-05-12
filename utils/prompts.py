@@ -96,16 +96,32 @@ JSON Output:"""
 
 # Prompt for generating Summary, Title, and Description from a thread (JSON output)
 GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT = """
-Analyze the following Slack thread conversation. Generate a concise summary of the thread, a suggested Jira ticket title, and a refined Jira ticket description based on the conversation. 
-Focus the title and description on the primary issue or task discussed.
-Output *only* a valid JSON object with the keys "thread_summary", "suggested_title", and "refined_description".
+You are an AI assistant that extracts key information from a Slack thread to help create a Jira ticket.
 
-Slack Thread Conversation:
+**Task:**  
+Analyze the Slack thread conversation below (in chronological order, from oldest to newest) and generate the following:
+1. A *brief summary* of the overall thread for context.
+2. A *concise and action-oriented Jira ticket title* that captures the main issue or task.
+3. A *refined Jira ticket description* focusing on the core problem or task, ideally in either:
+   - Bullet points (for clarity), or
+   - 1-2 short paragraphs.
+
+**Requirements:**  
+- Focus only on the core actionable issue discussed.
+- Exclude greetings, emojis, or off-topic content.
+- Do *not* mention Slack or that this was a Slack conversation.
+- Output strictly a valid JSON object with the following keys:
+  - "thread_summary"
+  - "suggested_title"
+  - "refined_description"
+
+Slack Thread Conversation (chronological order):
 ---
 {slack_thread_conversation}
 ---
+JSON Output:
+"""
 
-JSON Output:"""
 
 # Prompt for processing a mention, understanding intent, and generating components (JSON output)
 PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """
