@@ -156,6 +156,7 @@ def search_pinecone_index(index: Index, query_vector: List[float], k: int, names
 def upsert_documents_to_pinecone(index: Index, documents: List[Document], embeddings: List[List[float]], batch_size: int = 100, namespace: Optional[str] = None):
     """
     Upserts documents and their embeddings to Pinecone in batches.
+    Uses the 'ticketId' from metadata as the Pinecone vector ID.
 
     Args:
         index: The initialized Pinecone Index object.
@@ -184,19 +185,25 @@ def upsert_documents_to_pinecone(index: Index, documents: List[Document], embedd
         
         vectors_to_upsert = []
         for doc, emb in zip(batch_documents, batch_embeddings):
-            ticket_id = doc.metadata.get("ticket_id")
+            # --- REVERTED ID GENERATION ---
+            # Get ticketId from metadata (ensure key matches what's set in prepare_documents...)
+            ticket_id = doc.metadata.get("ticketId") 
+
             if not ticket_id:
-                logger.warning(f"Document is missing 'ticket_id' in metadata. Skipping. Document content: {doc.page_content[:100]}...")
-                error_count +=1
+                logger.warning(f"Document is missing 'ticketId' in metadata. Skipping. Content snippet: {doc.page_content[:100]}...")
+                error_count += 1
                 continue
             
-            # Ensure metadata values are suitable for Pinecone (e.g., strings, numbers, booleans, or lists of strings)
-            # For simplicity, we'll convert all metadata values to strings here.
-            # More sophisticated handling might be needed depending on actual metadata structure.
-            pinecone_metadata = {k: str(v) if v is not None else "" for k, v in doc.metadata.items()}
+            # Use the ticketId directly as the Pinecone ID (must be string)
+            pinecone_id = str(ticket_id)
+            # --- END REVERTED ID GENERATION ---
+
+            # Ensure metadata values are suitable for Pinecone 
+            # The cleaning done in prepare_documents_for_embedding should handle this
+            pinecone_metadata = doc.metadata 
 
             vectors_to_upsert.append({
-                "id": str(ticket_id),  # Pinecone ID must be a string
+                "id": pinecone_id,  # Use the ticketId as the ID
                 "values": emb,
                 "metadata": pinecone_metadata
             })
@@ -227,3 +234,87 @@ def upsert_documents_to_pinecone(index: Index, documents: List[Document], embedd
             error_count += len(vectors_to_upsert) # Assume all in batch failed if exception occurs
 
     logger.info(f"Pinecone upsert process finished. Total documents processed: {total_documents}. Successfully upserted (estimated): {upserted_count}. Errors/Skipped: {error_count}.")
+
+# --- NEW FUNCTION FOR INGESTION PIPELINE ---
+def initialize_pinecone_vector_store_ingestion(embeddings: Embeddings) -> Optional[Index]:
+    """
+    Initializes and returns a Pinecone Index object specifically for the ingestion pipeline.
+    If the index doesn't exist, it attempts to create it.
+    (Currently identical to initialize_pinecone_vector_store, but provides a separate entry point)
+    """
+    pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+    pinecone_index_name = os.environ.get("PINECONE_INDEX_NAME")
+
+    if not pinecone_api_key or not pinecone_index_name:
+        logger.warning("Missing PINECONE_API_KEY or PINECONE_INDEX_NAME in environment variables.")
+        return None
+    
+    if not embeddings:
+        logger.error("Embeddings object not provided, cannot determine dimension for index creation.")
+        return None
+
+    try:
+        pc = Pinecone(api_key=pinecone_api_key)
+        existing_indexes = [idx.name for idx in pc.list_indexes().indexes]
+
+        if pinecone_index_name not in existing_indexes:
+            logger.info(f"Index '{pinecone_index_name}' not found. Attempting to create it...")
+            
+            dimension = get_embedding_dimension(embeddings)
+            if dimension is None:
+                logger.error(f"Failed to get embedding dimension. Cannot create index '{pinecone_index_name}'.")
+                return None
+
+            logger.info(f"Creating index '{pinecone_index_name}' with dimension {dimension}, metric '{PINECONE_METRIC}', cloud '{PINECONE_CLOUD}', region '{PINECONE_REGION}'.")
+            try:
+                pc.create_index(
+                    name=pinecone_index_name,
+                    dimension=dimension,
+                    metric=PINECONE_METRIC,
+                    spec=ServerlessSpec(
+                        cloud=PINECONE_CLOUD,
+                        region=PINECONE_REGION
+                    ),
+                    timeout=-1 # Wait indefinitely for creation, or set a specific timeout in seconds
+                )
+                # Wait for the index to be ready
+                wait_time = 0
+                max_wait_time = 300 # 5 minutes
+                sleep_interval = 15 # seconds
+                while wait_time < max_wait_time:
+                    index_description = pc.describe_index(name=pinecone_index_name)
+                    if index_description.status and index_description.status['ready']:
+                        logger.info(f"Index '{pinecone_index_name}' created and is ready.")
+                        break
+                    logger.info(f"Waiting for index '{pinecone_index_name}' to be ready... ({wait_time}/{max_wait_time}s)")
+                    time.sleep(sleep_interval)
+                    wait_time += sleep_interval
+                else:
+                    logger.error(f"Index '{pinecone_index_name}' did not become ready within {max_wait_time} seconds.")
+                    # Optionally, attempt to delete the partially created index or handle error
+                    # try:
+                    #     pc.delete_index(pinecone_index_name)
+                    #     logger.info(f"Attempted to delete index '{pinecone_index_name}' after timeout.")
+                    # except Exception as del_e:
+                    #     logger.error(f"Failed to delete index '{pinecone_index_name}' after timeout: {del_e}")
+                    return None
+            except Exception as create_e:
+                logger.error(f"Failed to create Pinecone index '{pinecone_index_name}': {create_e}", exc_info=True)
+                return None
+        else:
+            logger.info(f"Index '{pinecone_index_name}' already exists.")
+
+        index = pc.Index(pinecone_index_name)
+        logger.info(f"Successfully connected to Pinecone index: {pinecone_index_name}")
+        # Verify connection and get stats
+        try:
+            stats = index.describe_index_stats()
+            logger.info(f"Index stats: {stats}")
+        except Exception as e_stats:
+            logger.warning(f"Could not retrieve stats for index '{pinecone_index_name}': {e_stats}")
+        return index
+
+    except Exception as e:
+        logger.error(f"Error initializing Pinecone: {e}", exc_info=True)
+        return None
+# --- END NEW FUNCTION ---

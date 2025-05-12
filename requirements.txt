@@ -9,5 +9,6 @@ langchain-cohere
 langchain-google-genai
 faiss-cpu
 retry
+pandarallel
 # Consider adding cohere SDK if direct calls are made, though langchain-cohere might suffice
 # cohere

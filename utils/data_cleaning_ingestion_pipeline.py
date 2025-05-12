@@ -9,14 +9,24 @@ The main entry point is `clean_all_columns(df)`, which returns a DataFrame with 
 import re
 import json
 import pandas as pd
+from pandarallel import pandarallel
 
-# --- Problem keywords for filtering comments ---
-PROBLEM_KEYWORDS = [
-    "error", "fail", "not working", "unable to", "crash", "timeout",
-    "unexpected", "broken", "incorrect", "missing", "issue", "bug",
-    "problem", "exception", "doesn't work", "can't", "cannot"
+# --- solution keywords for filtering comments ---
+SOLUTION_KEYWORDS = [
+    "fixed by", "fix available", "workaround", "resolved by", "solution", "patch",
+    "hotfix", "temporary fix", "permanent fix", "quick fix", "manual fix",
+    "mitigated by", "apply this", "can be solved by", "try this", "steps to fix",
+    "proposed solution", "proposed fix", "suggestion", "recommended",
+    "use this approach", "alternative", "change the setting", "adjust config",
+    "configuration change", "updated config", "rollback", "roll back",
+    "reverted", "downgrade", "upgrade", "update", "restart", "reboot",
+    "reinstall", "clean install", "reset", "patch applied", "deployed fix",
+    "resolved with", "resolved after", "fix implemented", "manually edited",
+    "follow these steps", "here's how", "you can fix this by", "script to fix",
+    "just do this", "solved after", "solved by", "mitigation", "workaround found"
 ]
-problem_keyword_pattern = r'\b(?:' + '|'.join(re.escape(k) for k in PROBLEM_KEYWORDS) + r')\b'
+
+solution_keyword_pattern = r'\b(?:' + '|'.join(re.escape(k) for k in SOLUTION_KEYWORDS) + r')\b'
 
 # --- Cleaning Functions ---
 def strip_jira_markup(text):
@@ -157,13 +167,41 @@ def parse_filter_and_format_comments(comments_json_str):
         for comment_obj in comments_list:
             comment_text = comment_obj.get('cleaned_body', '')
             if comment_text:
-                if re.search(problem_keyword_pattern, comment_text, flags=re.IGNORECASE):
+                if re.search(solution_keyword_pattern, comment_text, flags=re.IGNORECASE):
                     filtered_comment_texts.append(comment_text)
         return "\n".join(filtered_comment_texts)
     except json.JSONDecodeError:
         return ""
     except Exception:
         return ""
+
+# --- NEW HELPER FUNCTION ---
+def parse_and_join_json_list_string(value):
+    """Tries to parse a string as a JSON list and returns a comma-separated string.
+
+    If the input is a string like '["Val1", "Val2"]', it returns "Val1, Val2".
+    Handles potential JSON errors and non-list results gracefully.
+    Returns an empty string if input is not a valid JSON list string or is NaN/None.
+    """
+    if pd.isna(value) or not isinstance(value, str) or not value.strip():
+        return "" # Return empty string for NaN, None, non-strings, or empty strings
+    try:
+        # Attempt to parse the string as JSON
+        parsed_list = json.loads(value)
+        # Check if the parsed result is actually a list
+        if isinstance(parsed_list, list):
+            # Convert all items to string (just in case) and join with comma and space
+            return ", ".join(map(str, parsed_list))
+        else:
+            # Parsed correctly but wasn't a list, return empty string
+            return "" 
+    except json.JSONDecodeError:
+        # String was not valid JSON, return empty string
+        return "" 
+    except Exception:
+        # Catch any other unexpected errors during processing
+        return "" 
+# --- END NEW HELPER FUNCTION ---
 
 def clean_text_pipeline(text):
     """Apply all cleaning steps to a text field."""
@@ -181,9 +219,28 @@ def clean_text_pipeline(text):
     return text
 
 def clean_all_columns(df):
-    """Clean summary, description, and comments columns in the DataFrame."""
-    df['cleaned_summary'] = df['summary'].fillna('').astype(str).apply(clean_text_pipeline)
-    df['cleaned_description'] = df['description'].fillna('').astype(str).apply(clean_text_pipeline)
-    df['cleaned_comments'] = df['comments'].fillna('').astype(str).apply(parse_filter_and_format_comments)
-    df['cleaned_comments'] = df['cleaned_comments'].apply(clean_text_pipeline)
+    """Clean summary, description, and comments columns in the DataFrame using parallel processing."""
+    # Initialize pandarallel (uses all available cores by default, shows progress bar)
+    pandarallel.initialize(progress_bar=True)
+
+    # Use .parallel_apply() instead of .apply()
+    df['cleaned_summary'] = df['summary'].fillna('').astype(str).parallel_apply(clean_text_pipeline)
+    df['cleaned_description'] = df['description'].fillna('').astype(str).parallel_apply(clean_text_pipeline)
+    
+    # Apply sequence for comments using parallel processing
+    df['cleaned_comments'] = df['comments'].fillna('').astype(str).parallel_apply(parse_filter_and_format_comments)
+    df['cleaned_comments'] = df['cleaned_comments'].parallel_apply(clean_text_pipeline) # Apply again
+
+    # --- Process list-like string columns --- 
+    list_like_columns = ['labels', 'brand', 'components','environment']
+    for col in list_like_columns:
+        if col in df.columns:
+            # Apply the new parsing function using parallel processing
+            # The helper function handles NaN/None by returning ""
+            df[col] = df[col].parallel_apply(parse_and_join_json_list_string)
+        else:
+            # If the column doesn't exist in the DataFrame, create it and fill with empty strings
+            # This ensures the columns are present for later metadata extraction in the ingestion pipeline
+            df[col] = ""
+    
     return df 

@@ -84,6 +84,9 @@ from services.genai_service import generate_suggested_title, generate_refined_de
 # Import UI helpers
 from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 
+# Import the duplicate detection service
+from services.duplicate_detection_service import find_and_summarize_duplicates
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -779,7 +782,7 @@ if __name__ == "__main__":
             # Parameters: project_key, total_tickets_to_scrape, api_batch_size
             scraped_count, total_available = scrape_and_store_tickets(
                 project_key=project_key_to_scrape, 
-                total_tickets_to_scrape=200, # Changed from 2000 to 200
+                total_tickets_to_scrape=500, # Changed from 2000 to 200
                 api_batch_size=100
             )
             logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")

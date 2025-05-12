@@ -190,14 +190,14 @@ For *each* ticket, perform the following:
     Generate a concise summary of THE SOLUTION in bullet points (typically 3-6 points), phrased as if explaining the resolution *to the user*. Use descriptive language (e.g., "The issue was resolved...", "The root cause was identified as...", "This was fixed through..."). Focus on what actions or findings resolved the issue.
 4. If a clear solution/fix is NOT described, BUT there is evidence of significant progress, steps taken, or attempted workarounds (scenario 2b):
     Generate a concise summary of THE PROGRESS OR STEPS TAKEN in bullet points (typically 3-6 points), phrased as if explaining the status *to the user*. Use descriptive language (e.g., "Investigation currently points to...", "Steps taken so far include...", "The team is currently working on...", "Progress includes..."). Focus on the latest significant actions or findings.
-5. If neither a clear solution/fix nor significant progress/steps can be identified from the comments:
-    Output the specific string "No clear solution or significant progress identified in the comments."
+5. If neither a clear solution/fix nor significant progress/steps can be identified:
+    Output the specific string "No clear solution or significant progress identified."
 
 Output *only* a valid JSON list of strings. The list must contain exactly {batch_size} strings.
 Each string in the output list must be one of the following, corresponding to the ticket in the input list and maintaining original order:
 - The bullet-point solution summary (if scenario 2a).
 - The bullet-point progress/steps summary (if scenario 2b).
-- The "No clear solution or significant progress identified in the comments." message (if scenario 5).
+- The "No clear solution or significant progress identified." message (if scenario 5).
 
 Input JSON list of tickets (with newest comments first):
 ```json
@@ -208,7 +208,7 @@ Example output format for a batch of 4 tickets:
 [
   "- The root cause was identified as a network configuration issue.\n- Firewall rules were updated accordingly.\n- The fix has been verified with the user and the issue is resolved.",
   "- Investigation currently points towards a potential database deadlock.\n- An attempt was made to optimize related query Q1.\n- The system is now being monitored to assess the impact of this change.",
-  "No clear solution or significant progress identified in the comments.",
+  "No clear solution or significant progress identified.",
   "- A rollback of the recent deployment (version X) was performed.\n- The issue was confirmed resolved after the rollback."
 ]
 

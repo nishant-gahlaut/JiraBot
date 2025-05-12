@@ -5,6 +5,7 @@ import google.generativeai as genai # Import Google GenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 import json
 from typing import Optional, Dict, Any, List
+import time # ADDED IMPORT
 # tenacity is not used by the top-level functions, consider removing if GenAIService is fully gone
 # from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -459,7 +460,7 @@ def generate_concise_problem_statement(summary: str, description: str, comments:
 # --- NEW BATCH FUNCTION --- 
 def generate_concise_problem_statements_batch(batch_data: List[Dict[str, Any]], max_lines: int = 7) -> List[str]:
     """
-    Uses an LLM to generate concise problem statements for a batch of tickets.
+    Uses an LLM to generate concise problem statements for a batch of tickets, with retries.
 
     Args:
         batch_data: A list of dictionaries, where each dict represents a ticket
@@ -539,50 +540,90 @@ def generate_concise_problem_statements_batch(batch_data: List[Dict[str, Any]], 
         logger.warning(f"High token count ({prompt_token_count}) detected for batch LLM call. Consider reducing LLM_BATCH_SIZE or further input truncation.")
     # --- End Token Counting ---
 
-    raw_llm_output = "Error: LLM Invocation Failed Initially" # Default error
-    try:
-        response = llm.invoke(prompt)
-        raw_llm_output = response.content if hasattr(response, 'content') else str(response)
+    # --- Retry Logic ---
+    max_retries = 10
+    final_results = None
 
-        # Clean potential markdown code block wrappers
-        cleaned_output = raw_llm_output.strip()
-        if cleaned_output.startswith("```json"):
-            cleaned_output = cleaned_output[len("```json"):].strip()
-        if cleaned_output.startswith("```"):
-            cleaned_output = cleaned_output[len("```"):].strip()
-        if cleaned_output.endswith("```"):
-            cleaned_output = cleaned_output[:-len("```")].strip()
-            
-        logger.debug(f"Cleaned LLM batch output for JSON parsing: {cleaned_output[:200]}...")
+    for attempt in range(max_retries):
+        logger.info(f"Attempt {attempt + 1}/{max_retries} for batch problem statements (size: {batch_size})...")
+        raw_llm_output = f"Error: LLM Invocation Failed on attempt {attempt + 1}" # Default error for this attempt
+        try:
+            # --- LLM Invocation ---
+            response = llm.invoke(prompt)
+            raw_llm_output = response.content if hasattr(response, 'content') else str(response)
 
-        # Parse the JSON list response
-        results = json.loads(cleaned_output)
+            # --- Cleaning ---
+            cleaned_output = raw_llm_output.strip()
+            if cleaned_output.startswith("```json"):
+                cleaned_output = cleaned_output[len("```json"):].strip()
+            if cleaned_output.startswith("```"):
+                cleaned_output = cleaned_output[len("```"):].strip()
+            if cleaned_output.endswith("```"):
+                cleaned_output = cleaned_output[:-len("```")].strip()
 
-        if not isinstance(results, list):
-            logger.error(f"LLM batch output was not a list. Type: {type(results)}. Output: {cleaned_output[:500]}...")
-            raise ValueError("LLM output for batch was not a list.")
+            # --- Parsing ---
+            parsed_results = json.loads(cleaned_output)
 
-        if len(results) != batch_size:
-            logger.error(f"LLM batch output list size mismatch. Expected: {batch_size}, Got: {len(results)}. Output: {cleaned_output[:500]}...")
-            # For safety, return errors for all items in this batch
-            return [f"Error: LLM output size mismatch for item {item.get('id', 'N/A')}" for item in batch_data]
-            
-        # Optional: Post-process each result (e.g., strip extra whitespace)
-        processed_results = [str(res).strip() for res in results]
-        logger.info(f"Successfully generated and parsed {len(processed_results)} problem statements from batch LLM call.")
-        return processed_results
+            if not isinstance(parsed_results, list):
+                logger.warning(f"Attempt {attempt + 1}: LLM batch output was not a list. Output: {cleaned_output[:200]}... Retrying if attempts remain.")
+                if attempt < max_retries - 1:
+                    time.sleep(1) # Optional delay
+                    continue # Go to next attempt
+                else:
+                    # Final attempt failed
+                     logger.error(f"LLM batch output was not a list after {max_retries} attempts.")
+                     # Fall through to return error list after loop
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode LLM batch output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
-        return [f"Error: Failed to parse LLM JSON output for item {item.get('id', 'N/A')}" for item in batch_data]
-    except Exception as e:
-        logger.error(f"Error during LLM batch invocation or processing: {e}", exc_info=True)
-        return [f"Error: LLM invocation/processing failed for item {item.get('id', 'N/A')}" for item in batch_data]
+            # --- Size Check ---
+            elif len(parsed_results) == batch_size:
+                logger.info(f"Attempt {attempt + 1}: Successfully received correctly sized list ({batch_size} items).")
+                final_results = [str(res).strip() for res in parsed_results] # Process the good result
+                break # Exit retry loop successfully
+            else:
+                # Size mismatch, log and retry if attempts remain
+                logger.warning(f"Attempt {attempt + 1}: LLM batch output list size mismatch. Expected: {batch_size}, Got: {len(parsed_results)}. Output: {cleaned_output[:500]}... Retrying if attempts remain.")
+                if attempt < max_retries - 1:
+                    time.sleep(1) # Optional delay
+                    continue # Go to next attempt
+                else:
+                    # Exhausted retries with size mismatch
+                    logger.error(f"LLM batch output list size mismatch persisted after {max_retries} attempts. Expected: {batch_size}, Got: {len(parsed_results)}.)")
+                    # Fall through to return error list after loop
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Attempt {attempt + 1}: Failed to decode LLM batch output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'. Retrying if attempts remain.")
+            if attempt < max_retries - 1:
+                 time.sleep(1) # Optional delay
+                 continue
+            else:
+                logger.error(f"Failed to decode LLM batch output as JSON after {max_retries} attempts.")
+                # Fall through to return error list after loop
+        except Exception as e:
+             # Catch other potential errors during invoke/processing
+             logger.warning(f"Attempt {attempt + 1}: Error during LLM batch invocation or processing: {e}. Retrying if attempts remain.")
+             if attempt < max_retries - 1:
+                  time.sleep(1) # Optional delay
+                  continue
+             else:
+                  logger.error(f"Error during LLM batch invocation persisted after {max_retries} attempts: {e}", exc_info=True)
+                  # Fall through to return error list after loop
+
+        # If we reached here inside the loop without breaking or continuing, it means the last attempt failed.
+        # The loop will naturally end, and we'll check final_results below.
+
+    # --- End Retry Logic ---
+
+    # Check if loop completed successfully (final_results is set) or all retries failed
+    if final_results is not None:
+        return final_results
+    else:
+        logger.error(f"Failed to get valid batch response for problem statements after {max_retries} attempts.")
+        return [f"Error: Failed to generate/parse problem statement after {max_retries} retries for item {item.get('id', 'N/A')}" for item in batch_data]
 
 # --- NEW BATCH SOLUTION FUNCTION ---
 def generate_concise_solutions_batch(batch_data: List[Dict[str, Any]]) -> List[str]:
     """
-    Uses an LLM to generate concise solution summaries from comments for a batch of tickets.
+    Uses an LLM to generate concise solution summaries from comments for a batch of tickets, with retries.
 
     Args:
         batch_data: A list of dictionaries, where each dict represents a ticket
@@ -653,40 +694,82 @@ def generate_concise_solutions_batch(batch_data: List[Dict[str, Any]]) -> List[s
     if prompt_token_count > 80000:
         logger.warning(f"High token count ({prompt_token_count}) detected for batch solution LLM call. Consider reducing LLM_BATCH_SIZE or comment length.")
 
-    raw_llm_output = "Error: LLM Invocation Failed Initially for Solutions"
-    try:
-        response = llm.invoke(prompt)
-        raw_llm_output = response.content if hasattr(response, 'content') else str(response)
+    # --- Retry Logic ---
+    max_retries = 10
+    final_results = None
 
-        cleaned_output = raw_llm_output.strip()
-        if cleaned_output.startswith("```json"):
-            cleaned_output = cleaned_output[len("```json"):].strip()
-        if cleaned_output.startswith("```"):
-            cleaned_output = cleaned_output[len("```"):].strip()
-        if cleaned_output.endswith("```"):
-            cleaned_output = cleaned_output[:-len("```")].strip()
+    for attempt in range(max_retries):
+        logger.info(f"Attempt {attempt + 1}/{max_retries} for batch solutions (size: {batch_size})...")
+        raw_llm_output = f"Error: LLM Invocation Failed Initially for Solutions on attempt {attempt + 1}"
+        try:
+            # --- LLM Invocation ---
+            llm_response_obj = llm.invoke(prompt)
+            raw_llm_output = llm_response_obj.content if hasattr(llm_response_obj, 'content') else str(llm_response_obj)
 
-        logger.debug(f"Cleaned LLM batch solution output for JSON parsing: {cleaned_output[:300]}...")
-        results = json.loads(cleaned_output)
+            # --- Cleaning ---
+            cleaned_response_text = raw_llm_output.strip()
+            if cleaned_response_text.startswith("```json"):
+                cleaned_response_text = cleaned_response_text[len("```json"):].strip()
+            if cleaned_response_text.startswith("```"):
+                cleaned_response_text = cleaned_response_text[len("```"):].strip()
+            if cleaned_response_text.endswith("```"):
+                cleaned_response_text = cleaned_response_text[:-len("```")].strip()
 
-        if not isinstance(results, list):
-            logger.error(f"LLM batch solution output was not a list. Type: {type(results)}. Output: {cleaned_output[:500]}...")
-            raise ValueError("LLM output for batch solutions was not a list.")
+            logger.debug(f"Attempt {attempt+1}: Cleaned LLM response for batch solutions before JSON parsing: {cleaned_response_text[:500]}...")
 
-        if len(results) != batch_size:
-            logger.error(f"LLM batch solution output list size mismatch. Expected: {batch_size}, Got: {len(results)}. Output: {cleaned_output[:500]}...")
-            return [f"Error: LLM solution output size mismatch for item {item.get('id', 'N/A')}" for item in batch_data]
+            # --- Parsing ---
+            parsed_solutions = json.loads(cleaned_response_text, strict=False)
 
-        processed_results = [str(res).strip() for res in results]
-        logger.info(f"Successfully generated and parsed {len(processed_results)} solution summaries from batch LLM call.")
-        return processed_results
+            if not isinstance(parsed_solutions, list):
+                logger.warning(f"Attempt {attempt + 1}: LLM batch solution generation returned valid JSON, but it was not a list. Type: {type(parsed_solutions)}. Retrying if attempts remain.")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                else:
+                    logger.error(f"LLM batch solution generation did not return a list after {max_retries} attempts.")
+                    # Fall through
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode LLM batch solution output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
-        return [f"Error: Failed to parse LLM JSON solution output for item {item.get('id', 'N/A')}" for item in batch_data]
-    except Exception as e:
-        logger.error(f"Error during LLM batch solution invocation or processing: {e}", exc_info=True)
-        return [f"Error: LLM solution invocation/processing failed for item {item.get('id', 'N/A')}" for item in batch_data]
+            # --- Size Check ---
+            elif len(parsed_solutions) == batch_size:
+                logger.info(f"Attempt {attempt + 1}: Successfully received correctly sized solution list ({batch_size} items).")
+                final_results = [str(sol).strip() for sol in parsed_solutions] # Process good result
+                break # Exit loop successfully
+            else:
+                # Size mismatch
+                logger.warning(f"Attempt {attempt + 1}: LLM batch solution result count mismatch. Expected {batch_size}, got {len(parsed_solutions)}. Retrying if attempts remain.")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                else:
+                    logger.error(f"LLM batch solution result count mismatch persisted after {max_retries} attempts. Expected: {batch_size}, Got: {len(parsed_solutions)}.)")
+                    # Fall through
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Attempt {attempt + 1}: LLM batch solution generation failed to parse JSON. Error: {e}. Raw Response: {raw_llm_output[:1000]}... Retrying if attempts remain.")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            else:
+                 logger.error(f"Failed to parse LLM JSON solution output after {max_retries} attempts.")
+                 # Fall through
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1}: An unexpected error occurred during LLM batch solution processing: {e}. Raw Response: {raw_llm_output[:1000]}... Retrying if attempts remain.")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            else:
+                logger.error(f"Unexpected error processing LLM solution response persisted after {max_retries} attempts: {e}", exc_info=True)
+                # Fall through
+
+        # If we reached here inside the loop without breaking or continuing, it means the last attempt failed.
+
+    # --- End Retry Logic ---
+
+    if final_results is not None:
+        return final_results
+    else:
+        logger.error(f"Failed to get valid batch response for solutions after {max_retries} attempts.")
+        return [f"Error: Failed to generate/parse solution after {max_retries} retries for item {item.get('id', 'N/A')}" for item in batch_data]
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
