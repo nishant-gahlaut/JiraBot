@@ -509,11 +509,34 @@ def generate_concise_problem_statements_batch(batch_data: List[Dict[str, Any]], 
     )
 
     # Estimate token count - very rough, use a proper tokenizer if needed
-    prompt_token_estimate = len(prompt) // 3 # Rough estimate
-    logger.debug(f"Invoking LLM for batch problem statements. Batch Size: {batch_size}. Prompt Token Estimate: ~{prompt_token_estimate}")
-    # Adjust threshold based on the specific model's context window (e.g., Gemini 1.5 Flash is large, but use a safer limit)
-    if prompt_token_estimate > 80000: # Example Threshold (adjust based on model limits)
-         logger.warning(f"Potential high token count ({prompt_token_estimate}) for batch LLM call. Consider reducing LLM_BATCH_SIZE or further input truncation.")
+    # prompt_token_estimate = len(prompt) // 3 # Rough estimate - Replaced with more accurate count below
+    # logger.debug(f"Invoking LLM for batch problem statements. Batch Size: {batch_size}. Prompt Token Estimate: ~{prompt_token_estimate}")
+    # # Adjust threshold based on the specific model's context window (e.g., Gemini 1.5 Flash is large, but use a safer limit)
+    # if prompt_token_estimate > 80000: # Example Threshold (adjust based on model limits)
+    #      logger.warning(f"Potential high token count ({prompt_token_estimate}) for batch LLM call. Consider reducing LLM_BATCH_SIZE or further input truncation.")
+    
+    # --- Accurate Token Counting for the Prompt ---
+    prompt_token_count = -1 # Default if counting fails
+    if genai_model: # Check if the base model client is available
+        try:
+            count_response = genai_model.count_tokens(prompt)
+            prompt_token_count = count_response.total_tokens
+            logger.info(f"Prompt token count for batch size {batch_size}: {prompt_token_count} tokens.")
+        except Exception as count_e:
+            logger.warning(f"Could not count prompt tokens using genai_model: {count_e}. Falling back to estimate.")
+            # Fallback to rough estimate if count fails
+            prompt_token_count = len(prompt) // 3 
+            logger.info(f"Prompt token count ESTIMATE for batch size {batch_size}: ~{prompt_token_count} tokens.")
+    else:
+        logger.warning("Base genai_model not initialized, cannot accurately count prompt tokens. Using estimate.")
+        prompt_token_count = len(prompt) // 3
+        logger.info(f"Prompt token count ESTIMATE for batch size {batch_size}: ~{prompt_token_count} tokens.")
+        
+    # Note: Checking remaining account tokens is not possible via the API response.
+    # Monitor usage via Google Cloud Console.
+    if prompt_token_count > 80000: # Re-evaluate threshold based on accurate count if available
+        logger.warning(f"High token count ({prompt_token_count}) detected for batch LLM call. Consider reducing LLM_BATCH_SIZE or further input truncation.")
+    # --- End Token Counting ---
 
     raw_llm_output = "Error: LLM Invocation Failed Initially" # Default error
     try:

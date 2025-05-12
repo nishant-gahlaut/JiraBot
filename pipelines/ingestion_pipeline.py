@@ -225,7 +225,7 @@ def run_ingestion_pipeline():
     
     if data_for_summary_csv:
         summary_df = pd.DataFrame(data_for_summary_csv)
-        output_csv_filename = "summary_jira2.csv"
+        output_csv_filename = "summary_jira4.csv"
         try:
             summary_df.to_csv(output_csv_filename, index=False, encoding='utf-8', quoting=csv.QUOTE_ALL)
             logger.info(f"Successfully saved summary data for {len(summary_df)} documents to '{output_csv_filename}'.")
@@ -234,9 +234,9 @@ def run_ingestion_pipeline():
             # Decide if this error should halt the pipeline or just be logged
             # For now, just log it and continue
     else:
-        logger.warning("No data extracted from documents to save to summary_jira.csv.")
-    # # 3. Initialize Cohere embeddings model (needed for Pinecone init if it relies on dimension)
-    # # and Pinecone index
+                    logger.warning("No data extracted from documents to save to summary_jira.csv.")
+    # 3. Initialize Cohere embeddings model (needed for Pinecone init if it relies on dimension)
+    # and Pinecone index
     # logger.info("Initializing Cohere embeddings model...")
     # cohere_embeddings = get_cohere_embeddings() # From embedding_service
     # if not cohere_embeddings:

@@ -148,8 +148,10 @@ def parse_filter_and_format_comments(comments_json_str):
         if not isinstance(comments_list, list) or not comments_list:
             return ""
         try:
-            comments_list.sort(key=lambda x: x.get('timestamp', ''))
+            # Sort comments by timestamp, newest to oldest
+            comments_list.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         except TypeError:
+            # Handle cases where timestamp might be missing or not comparable
             pass
         filtered_comment_texts = []
         for comment_obj in comments_list:

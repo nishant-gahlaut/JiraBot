@@ -779,7 +779,7 @@ if __name__ == "__main__":
             # Parameters: project_key, total_tickets_to_scrape, api_batch_size
             scraped_count, total_available = scrape_and_store_tickets(
                 project_key=project_key_to_scrape, 
-                total_tickets_to_scrape=50, # Changed from 2000 to 200
+                total_tickets_to_scrape=600, # Changed from 2000 to 200
                 api_batch_size=100
             )
             logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
