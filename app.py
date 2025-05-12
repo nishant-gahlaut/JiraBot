@@ -7,6 +7,7 @@ import logging
 from slack_sdk import WebClient
 import json
 from slack_sdk.errors import SlackApiError
+from concurrent.futures import ThreadPoolExecutor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -85,10 +86,14 @@ from services.genai_service import generate_suggested_title, generate_refined_de
 from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 
 # Import the duplicate detection service
-from services.duplicate_detection_service import find_and_summarize_duplicates
+from services.duplicate_detection_service import find_and_summarize_duplicates,find_and_summarize_duplicatessss
+from handlers.modals.modal_builders import build_similar_tickets_modal, build_loading_modal_view
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Initialize a ThreadPoolExecutor for background tasks
+app_executor = ThreadPoolExecutor(max_workers=10)
 
 # Initializes your app with your bot token and signing secret
 app = App(
@@ -499,7 +504,7 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
             text=f"Thanks, <@{user_id}>! Searching for JIRA tickets similar to the conversation summary..."
         )
 
-        duplicate_results = find_and_summarize_duplicates(user_query=summary_to_search)
+        duplicate_results = find_and_summarize_duplicatessss(user_query=summary_to_search)
         top_tickets = duplicate_results.get("tickets", [])
         overall_summary = duplicate_results.get("summary", "Could not generate an overall summary for similar tickets.")
 
@@ -626,19 +631,6 @@ def handle_modal_submission(ack, body, client, view, logger): # This is the app'
     # This now calls the imported and aliased handler
     imported_handle_modal_submission(ack, body, client, view, logger)
 
-# Helper function to build a simple loading modal
-def build_loading_modal_view(message="Processing your request..."):
-    return {
-        "type": "modal",
-        "title": {"type": "plain_text", "text": "Jira Bot is Working..."},
-        "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": message},
-            }
-        ],
-    }
-
 # --- Message Shortcut Handler ---
 @app.shortcut("create_ticket_from_thread_message_action")
 def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
@@ -651,13 +643,11 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
     original_message_ts = message_data["ts"]
     thread_parent_ts = message_data.get("thread_ts", original_message_ts)
     
-    # Initial view_id for the loading modal
     view_id = None
 
     try:
         logger.info(f"'Create Ticket from Thread' shortcut: User {user_id_invoked} in channel {channel_id}, thread {thread_parent_ts}.")
 
-        # 1. Open a loading modal immediately
         loading_view_response = client.views_open(
             trigger_id=trigger_id,
             view=build_loading_modal_view("🤖 Our AI is analyzing the thread and generating ticket details for you. This may take a few moments... ⏳")
@@ -665,8 +655,6 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
         view_id = loading_view_response["view"]["id"]
         logger.info(f"Opened loading modal with view_id: {view_id}")
 
-        # 2. Fetch thread messages
-        logger.info(f"Fetching replies for thread: {thread_parent_ts} in channel {channel_id}")
         all_thread_messages = []
         cursor = None
         while True:
@@ -696,47 +684,45 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
             client.views_update(view_id=view_id, view=error_view)
             return
 
-        # 3. Perform the single AI call to generate ticket components
         logger.info(f"Generating ticket components from formatted conversation (first 200 chars): {formatted_conversation[:200]}...")
         ticket_components = generate_ticket_components_from_thread(formatted_conversation)
         
         ai_title = ticket_components.get("suggested_title")
         ai_description = ticket_components.get("refined_description")
-        # thread_summary = ticket_components.get("thread_summary") # Available if needed
+        thread_summary = ticket_components.get("thread_summary") # Get the thread summary
 
         if not ai_title or ai_title.startswith("Error:") or not ai_description or ai_description.startswith("Error:"):
             error_message = "Sorry, I couldn't generate all ticket details from the thread."
             detailed_error = f"AI generation failed. Title: '{ai_title}', Description: '{ai_description}'"
             logger.error(detailed_error)
-            final_error_view = build_loading_modal_view(f"{error_message}. Please try again. ({detailed_error[:100]})")
+            final_error_view = build_loading_modal_view(f"{error_message}. Please try again. ({detailed_error[:100]})" )
             client.views_update(view_id=view_id, view=final_error_view)
             return
 
         logger.info(f"AI Suggested Title: {ai_title}")
         logger.info(f"AI Refined Description: {ai_description[:200]}...")
-        # if thread_summary and not thread_summary.startswith("Error:"):
-        #      logger.info(f"Thread Summary (for context/debugging): {thread_summary[:200]}...")
+        if thread_summary and not thread_summary.startswith("Error:"):
+             logger.info(f"AI Thread Summary (for context/debugging): {thread_summary[:200]}...")
+        else:
+             logger.warning(f"AI Thread Summary was not generated or had an error: {thread_summary}")
+             thread_summary = "" # Ensure it's an empty string if problematic
 
-        # 4. Build and Update Modal with the actual form
-        # This dictionary itself contains the data we need to retrieve later.
-        # The key to store it under will be its JSON string representation.
         context_to_store = {
             "channel_id": channel_id,
             "thread_ts": original_message_ts, 
             "user_id": user_id_invoked,
-            "is_message_action": True 
-            # Add any other data that handle_modal_submission might need from this specific flow
+            "is_message_action": True, 
+            "thread_summary": thread_summary  # --- ADDED thread_summary --- 
         }
         private_metadata_key_str = json.dumps(context_to_store)
 
-        # Store the context in conversation_states using the string key
-        conversation_states[private_metadata_key_str] = context_to_store
-        logger.info(f"Stored context in conversation_states with key: {private_metadata_key_str}")
+        # conversation_states[private_metadata_key_str] = context_to_store # This line seems to store the context in conversation_states using the JSON string AS THE KEY. Ensure this is intended for retrieval in modal submission.
+        # Typically, private_metadata in the modal itself carries the context directly.
 
         final_modal_view = build_create_ticket_modal(
             initial_summary=ai_title, 
             initial_description=ai_description,
-            private_metadata=private_metadata_key_str # Pass the string key to the modal
+            private_metadata=private_metadata_key_str 
         )
         
         client.views_update(view_id=view_id, view=final_modal_view)
@@ -745,12 +731,12 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
     except SlackApiError as e:
         logger.error(f"Slack API error in handle_create_ticket_from_thread: {e.response['error']}", exc_info=True)
         error_text = f"A Slack API error occurred: {e.response['error']}. Please try again."
-        if view_id: # If loading modal was opened, update it with error
+        if view_id:
             try:
                 client.views_update(view_id=view_id, view=build_loading_modal_view(error_text))
             except Exception as e_update:
                  logger.error(f"Failed to update modal with Slack API error: {e_update}")
-        else: # If loading modal failed to open, try ephemeral message
+        else:
              try:
                 client.chat_postEphemeral(channel=channel_id, user=user_id_invoked, thread_ts=original_message_ts, text=error_text)
              except Exception as e_ephemeral:
@@ -759,17 +745,135 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
     except Exception as e:
         logger.error(f"Unexpected error in handle_create_ticket_from_thread: {e}", exc_info=True)
         error_text = "An unexpected error occurred while processing your request."
-        if view_id: # If loading modal was opened, update it
+        if view_id:
             try:
                 client.views_update(view_id=view_id, view=build_loading_modal_view(error_text))
             except Exception as e_update:
                 logger.error(f"Failed to update modal with general error: {e_update}")
-        else: # Fallback if view_id not set (e.g., error before views.open)
+        else:
             try:
-                if channel_id and user_id_invoked: # Check if we have these to post an ephemeral
+                if channel_id and user_id_invoked:
                     client.chat_postEphemeral(channel=channel_id, user=user_id_invoked, thread_ts=original_message_ts, text=error_text)
             except Exception as e_ephemeral:
                 logger.error(f"Failed to send ephemeral error message: {e_ephemeral}")
+
+
+# --- Helper for background task ---
+def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summary, user_id, channel_id):
+    logger.info(f"Background task started for view_id: {view_id}, finding similar tickets for user: {user_id}")
+    final_view = None
+    try:
+        logger.info(f"Finding duplicates based on thread summary (first 100 chars): {thread_summary[:100]}...")
+        duplicate_results = find_and_summarize_duplicates(user_query=thread_summary)
+        top_similar_tickets = duplicate_results.get("tickets", [])
+        
+        similar_tickets_details_for_modal = []
+        for ticket_result in top_similar_tickets:
+            metadata = ticket_result.get("metadata", {})
+            problem_statement = ticket_result.get("page_content") 
+            solution_summary = metadata.get("retrieved_solution_summary")
+            if not problem_statement:
+                problem_statement = metadata.get("retrieved_problem_statement", "_(Problem details not found)_")
+            if not solution_summary:
+                solution_summary = "_(Resolution details not found)_";
+            transformed_ticket = {
+                'key': metadata.get('ticket_id', 'N/A'),
+                'url': metadata.get('url'),
+                'summary': metadata.get('summary', '_(Original summary missing)_'),
+                'status': metadata.get('status', '_Status N/A_'),
+                'priority': metadata.get('priority', ''),
+                'assignee': metadata.get('assignee', ''),
+                'issue_type': metadata.get('issue_type', ''),
+                'retrieved_problem_statement': problem_statement,
+                'retrieved_solution_summary': solution_summary
+            }
+            similar_tickets_details_for_modal.append(transformed_ticket)
+
+        if not similar_tickets_details_for_modal:
+            logger.info(f"No similar tickets found based on the thread summary for view_id: {view_id}.")
+            # Update the modal to say no tickets were found
+            final_view = build_similar_tickets_modal([]) # Pass empty list to show "No tickets" message
+        else:
+            final_view = build_similar_tickets_modal(similar_tickets_details_for_modal)
+        
+        client.views_update(view_id=view_id, view=final_view)
+        logger.info(f"Updated modal {view_id} for user {user_id} with {len(similar_tickets_details_for_modal)} similar tickets.")
+
+    except Exception as e:
+        logger.error(f"Error in background task for view_id {view_id}: {e}", exc_info=True)
+        # Update the modal with an error message
+        error_modal_view = build_loading_modal_view(message="Sorry, an error occurred while finding similar tickets.")
+        try:
+            client.views_update(view_id=view_id, view=error_modal_view)
+        except Exception as e_update:
+            logger.error(f"Failed to update modal {view_id} with error message: {e_update}")
+
+
+@app.action("view_similar_tickets_modal_button")
+def handle_view_similar_tickets_action(ack, body, client, logger):
+    logger.info(f"User {body['user']['id']} clicked 'View Similar Tickets' button.")
+    ack() # Acknowledge the action immediately
+
+    trigger_id = body["trigger_id"]
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"] # For potential ephemeral messages
+    action_details = body["actions"][0]
+    button_value_str = action_details.get("value")
+
+    thread_summary = None
+    if button_value_str:
+        try:
+            button_payload = json.loads(button_value_str)
+            if isinstance(button_payload, dict):
+                thread_summary = button_payload.get("thread_summary")
+            else:
+                logger.error(f"Button value was not a dictionary: {button_value_str}")
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse JSON from button value: {button_value_str}")
+    
+    if not thread_summary:
+        logger.warning("Could not extract thread_summary from button value. Cannot find similar tickets.")
+        try:
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="Sorry, I couldn't retrieve the context needed to find similar tickets.")
+        except Exception as e_post:
+            logger.error(f"Failed to post ephemeral error for missing thread_summary: {e_post}")
+        return
+
+    try:
+        # --- Open a loading modal immediately ---
+        loading_view = build_loading_modal_view(message="🔍 Finding similar tickets for you... please wait a moment.")
+        loading_modal_response = client.views_open(
+            trigger_id=trigger_id,
+            view=loading_view
+        )
+        loading_view_id = loading_modal_response["view"]["id"]
+        logger.info(f"Opened loading modal {loading_view_id} for user {user_id} to find similar tickets.")
+
+        # --- Submit the long-running task to the executor ---
+        app_executor.submit(
+            _task_find_and_display_similar_tickets, 
+            client, 
+            logger, 
+            loading_view_id, 
+            thread_summary, 
+            user_id,
+            channel_id # Pass channel_id if the task needs it for error reporting, though modal update is preferred
+        )
+        logger.info(f"Submitted background task for view_id: {loading_view_id} to find similar tickets.")
+
+    except SlackApiError as e:
+        logger.error(f"Slack API error opening loading modal: {e.response['error']}", exc_info=True)
+        # Notify user if initial modal opening fails
+        try:
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="Sorry, an error occurred trying to process your request. Please try again.")
+        except Exception as e_post:
+            logger.error(f"Failed to post ephemeral error for modal open failure: {e_post}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_view_similar_tickets_action: {e}", exc_info=True)
+        try:
+            client.chat_postEphemeral(channel=channel_id, user=user_id, text="An unexpected error occurred. Please try again.")
+        except Exception as e_post:
+            logger.error(f"Failed to post ephemeral error for unexpected error: {e_post}")
 
 
 # --- Start the App ---
