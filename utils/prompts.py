@@ -174,4 +174,42 @@ Each string in the output list must be the concise problem statement (based on s
 Example output format for a batch of 2:
 ["Concise problem statement for first ticket based on its summary/desc.", "Concise problem statement for second ticket based on its summary/desc."]
 
-JSON Output list of concise problem statements:""" 
+JSON Output list of concise problem statements:"""
+
+# Prompt for generating concise solution summaries from comments for a BATCH of tickets
+GENERATE_CONCISE_SOLUTIONS_BATCH_PROMPT = """
+You are an AI assistant tasked with analyzing Jira ticket comment history to identify potential solutions, resolutions, or significant progress.
+Input is a JSON list of ticket objects, each containing 'id' and 'cleaned_comments'. The comments are sorted newest to oldest.
+Analyze the 'cleaned_comments' for *each* ticket object in the input list ({batch_size} tickets total).
+For *each* ticket, perform the following:
+1. Read through the 'cleaned_comments' (remembering they are oldest first) to understand the resolution attempts and outcomes.
+2. Determine if the comments describe:
+    a. A clear, implemented solution or fix that resolved the issue.
+    b. Significant progress, investigative steps taken, or workarounds attempted, even if a final resolution is not yet documented.
+3. If a clear solution/fix (scenario 2a) is described:
+    Generate a concise summary of THE SOLUTION in bullet points (typically 3-6 points), phrased as if explaining the resolution *to the user*. Use descriptive language (e.g., "The issue was resolved...", "The root cause was identified as...", "This was fixed through..."). Focus on what actions or findings resolved the issue.
+4. If a clear solution/fix is NOT described, BUT there is evidence of significant progress, steps taken, or attempted workarounds (scenario 2b):
+    Generate a concise summary of THE PROGRESS OR STEPS TAKEN in bullet points (typically 3-6 points), phrased as if explaining the status *to the user*. Use descriptive language (e.g., "Investigation currently points to...", "Steps taken so far include...", "The team is currently working on...", "Progress includes..."). Focus on the latest significant actions or findings.
+5. If neither a clear solution/fix nor significant progress/steps can be identified from the comments:
+    Output the specific string "No clear solution or significant progress identified in the comments."
+
+Output *only* a valid JSON list of strings. The list must contain exactly {batch_size} strings.
+Each string in the output list must be one of the following, corresponding to the ticket in the input list and maintaining original order:
+- The bullet-point solution summary (if scenario 2a).
+- The bullet-point progress/steps summary (if scenario 2b).
+- The "No clear solution or significant progress identified in the comments." message (if scenario 5).
+
+Input JSON list of tickets (with newest comments first):
+```json
+{batch_input_json}
+```
+
+Example output format for a batch of 4 tickets:
+[
+  "- The root cause was identified as a network configuration issue.\n- Firewall rules were updated accordingly.\n- The fix has been verified with the user and the issue is resolved.",
+  "- Investigation currently points towards a potential database deadlock.\n- An attempt was made to optimize related query Q1.\n- The system is now being monitored to assess the impact of this change.",
+  "No clear solution or significant progress identified in the comments.",
+  "- A rollback of the recent deployment (version X) was performed.\n- The issue was confirmed resolved after the rollback."
+]
+
+JSON Output list of concise solution summaries, progress updates, or 'no clear information' messages:""" 

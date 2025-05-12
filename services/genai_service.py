@@ -17,7 +17,8 @@ from utils.prompts import (
     GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT,
     PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT,
     GENERATE_CONCISE_PROBLEM_STATEMENT_PROMPT,
-    GENERATE_CONCISE_PROBLEM_STATEMENTS_BATCH_PROMPT # ADDED IMPORT
+    GENERATE_CONCISE_PROBLEM_STATEMENTS_BATCH_PROMPT, # ADDED IMPORT
+    GENERATE_CONCISE_SOLUTIONS_BATCH_PROMPT # ADDED IMPORT FOR NEW PROMPT
 )
 
 logger = logging.getLogger(__name__)
@@ -577,6 +578,115 @@ def generate_concise_problem_statements_batch(batch_data: List[Dict[str, Any]], 
     except Exception as e:
         logger.error(f"Error during LLM batch invocation or processing: {e}", exc_info=True)
         return [f"Error: LLM invocation/processing failed for item {item.get('id', 'N/A')}" for item in batch_data]
+
+# --- NEW BATCH SOLUTION FUNCTION ---
+def generate_concise_solutions_batch(batch_data: List[Dict[str, Any]]) -> List[str]:
+    """
+    Uses an LLM to generate concise solution summaries from comments for a batch of tickets.
+
+    Args:
+        batch_data: A list of dictionaries, where each dict represents a ticket
+                    and must contain 'id' (unique identifier like index or ticket_id)
+                    and 'cleaned_comments'.
+
+    Returns:
+        A list of strings. Each string is either the generated solution summary (in bullet points)
+        or a message "No clear solution identified in the comments."
+        corresponding to the input batch order.
+    """
+    llm = get_llm()
+    if not llm:
+        logger.error("Cannot generate batch solutions: LLM instance not available.")
+        return [f"Error: LLM unavailable for solution generation for item {item.get('id', 'N/A')}" for item in batch_data]
+
+    if not batch_data:
+        logger.warning("Received empty batch_data for solution generation.")
+        return []
+
+    batch_size = len(batch_data)
+
+    prepared_batch_data = []
+    for item in batch_data:
+        # Truncate comments if they are too long to avoid excessively large prompts
+        comments = str(item.get('cleaned_comments', ''))
+        # Max length for comments per ticket in the batch prompt (adjust as needed)
+        # This is a safeguard, individual comment cleaning should also handle extreme lengths.
+        max_comment_length_for_batch_item = 5000
+        if len(comments) > max_comment_length_for_batch_item:
+            comments = comments[:max_comment_length_for_batch_item] + "... (truncated for batch prompt)"
+            logger.debug(f"Comment for item {item.get('id', 'N/A')} truncated for batch solution prompt.")
+
+        prepared_batch_data.append({
+            "id": item.get('id', 'N/A'),
+            "cleaned_comments": comments
+        })
+
+    try:
+        batch_input_json = json.dumps(prepared_batch_data, indent=2, ensure_ascii=True)
+    except Exception as e:
+        logger.error(f"Failed to serialize batch data to JSON for solution generation: {e}", exc_info=True)
+        return [f"Error: Failed to prepare batch input for solution for item {item.get('id', 'N/A')}" for item in batch_data]
+
+    prompt = GENERATE_CONCISE_SOLUTIONS_BATCH_PROMPT.format(
+        batch_input_json=batch_input_json,
+        batch_size=batch_size
+        # The prompt itself guides on bullet points (2-5), so max_lines isn't explicitly passed here
+        # but could be added if prompt was designed to take it.
+    )
+
+    prompt_token_count = -1
+    if genai_model:
+        try:
+            count_response = genai_model.count_tokens(prompt)
+            prompt_token_count = count_response.total_tokens
+            logger.info(f"Solution Prompt token count for batch size {batch_size}: {prompt_token_count} tokens.")
+        except Exception as count_e:
+            logger.warning(f"Could not count solution prompt tokens: {count_e}. Estimating.")
+            prompt_token_count = len(prompt) // 3
+            logger.info(f"Solution Prompt token count ESTIMATE for batch size {batch_size}: ~{prompt_token_count} tokens.")
+    else:
+        logger.warning("Base genai_model not initialized for token counting (solutions). Estimating.")
+        prompt_token_count = len(prompt) // 3
+        logger.info(f"Solution Prompt token count ESTIMATE for batch size {batch_size}: ~{prompt_token_count} tokens.")
+
+    # Threshold from problem statement generation, can be adjusted if needed
+    if prompt_token_count > 80000:
+        logger.warning(f"High token count ({prompt_token_count}) detected for batch solution LLM call. Consider reducing LLM_BATCH_SIZE or comment length.")
+
+    raw_llm_output = "Error: LLM Invocation Failed Initially for Solutions"
+    try:
+        response = llm.invoke(prompt)
+        raw_llm_output = response.content if hasattr(response, 'content') else str(response)
+
+        cleaned_output = raw_llm_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[len("```json"):].strip()
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[len("```"):].strip()
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-len("```")].strip()
+
+        logger.debug(f"Cleaned LLM batch solution output for JSON parsing: {cleaned_output[:300]}...")
+        results = json.loads(cleaned_output)
+
+        if not isinstance(results, list):
+            logger.error(f"LLM batch solution output was not a list. Type: {type(results)}. Output: {cleaned_output[:500]}...")
+            raise ValueError("LLM output for batch solutions was not a list.")
+
+        if len(results) != batch_size:
+            logger.error(f"LLM batch solution output list size mismatch. Expected: {batch_size}, Got: {len(results)}. Output: {cleaned_output[:500]}...")
+            return [f"Error: LLM solution output size mismatch for item {item.get('id', 'N/A')}" for item in batch_data]
+
+        processed_results = [str(res).strip() for res in results]
+        logger.info(f"Successfully generated and parsed {len(processed_results)} solution summaries from batch LLM call.")
+        return processed_results
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to decode LLM batch solution output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'")
+        return [f"Error: Failed to parse LLM JSON solution output for item {item.get('id', 'N/A')}" for item in batch_data]
+    except Exception as e:
+        logger.error(f"Error during LLM batch solution invocation or processing: {e}", exc_info=True)
+        return [f"Error: LLM solution invocation/processing failed for item {item.get('id', 'N/A')}" for item in batch_data]
 
 # Example usage (optional, for testing)
 if __name__ == '__main__':
