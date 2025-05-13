@@ -219,10 +219,10 @@ For *each* ticket, perform the following:
     a. A clear, implemented solution or fix that resolved the issue.
     b. Significant progress, investigative steps taken, or workarounds attempted, even if a final resolution is not yet documented.
 3. If a clear solution/fix (scenario 2a) is described:
-    Generate a concise summary of THE SOLUTION in bullet points (typically 3-6 points), phrased as if explaining the resolution *to the user*. Use descriptive language (e.g., "The issue was resolved...", "The root cause was identified as...", "This was fixed through..."). Focus on what actions or findings resolved the issue.
+    Generate a summary of THE SOLUTION in bullet points (typically 3-6 points), phrased as if explaining the resolution *to the user*. Use descriptive language (e.g., "The issue was resolved...", "The root cause was identified as...", "This was fixed through..."). Focus on what actions or findings resolved the issue.
 4. If a clear solution/fix is NOT described, BUT there is evidence of significant progress, steps taken, or attempted workarounds (scenario 2b):
     Generate a concise summary of THE PROGRESS OR STEPS TAKEN in bullet points (typically 3-6 points), phrased as if explaining the status *to the user*. Use descriptive language (e.g., "Investigation currently points to...", "Steps taken so far include...", "The team is currently working on...", "Progress includes..."). Focus on the latest significant actions or findings.
-5. If neither a clear solution/fix nor significant progress/steps can be identified:
+5. If neither a solution/fix nor significant progress/steps can be identified:
     Output the specific string "No clear solution or significant progress identified."
 
 Output *only* a valid JSON list of strings. The list must contain exactly {batch_size} strings.

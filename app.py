@@ -518,19 +518,35 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
                  response_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_{overall_summary}_"}})
             # response_blocks.append({"type": "divider"}) # Divider will be added by build_rich_ticket_blocks
 
-            for ticket_info_dict in top_tickets:
-                current_metadata = ticket_info_dict.get("metadata", {})
-                # Ensure all necessary fields for build_rich_ticket_blocks are present
-                ticket_data_for_blocks = {
-                    'ticket_key': current_metadata.get('ticket_id', 'Unknown ID'),
-                    'summary': current_metadata.get('summary', current_metadata.get('page_content', 'No summary')[:100]), # Fallback for summary
-                    'url': current_metadata.get('url'),
-                    'status': current_metadata.get('status', 'N/A'),
-                    'priority': current_metadata.get('priority', 'N/A'),
-                    'assignee': current_metadata.get('assignee', 'Unassigned'),
-                    'issue_type': current_metadata.get('issue_type', 'N/A')
+            for ticket_result in top_tickets:
+                metadata = ticket_result.get("metadata", {})
+                
+                # Explicitly prioritize metadata.retrieved_problem_statement
+                problem_statement_for_display = metadata.get("retrieved_problem_statement")
+
+                # If that's empty, try page_content (which should ideally be the same)
+                if not problem_statement_for_display:
+                    problem_statement_for_display = ticket_result.get("page_content")
+                
+                # If both are empty, fall back to the original ticket summary
+                if not problem_statement_for_display:
+                    problem_statement_for_display = metadata.get("summary", "_(Problem details not found)_")
+
+                # For solution, keep existing logic
+                solution_summary_for_display = metadata.get("retrieved_solution_summary", "_(Resolution details not found)_")
+                
+                transformed_ticket = {
+                    'key': metadata.get('ticket_id', 'N/A'),
+                    'url': metadata.get('url'), # UI helper will construct if this is missing/nan
+                    'summary': metadata.get('summary', '_(Original summary missing)_'), # Original summary for title/link text
+                    'status': metadata.get('status', '_Status N/A_'),
+                    'priority': metadata.get('priority', ''),
+                    'assignee': metadata.get('assignee', ''),
+                    'issue_type': metadata.get('issue_type', ''),
+                    'retrieved_problem_statement': problem_statement_for_display,
+                    'retrieved_solution_summary': solution_summary_for_display
                 }
-                rich_ticket_blocks = build_rich_ticket_blocks(ticket_data_for_blocks) # No action elements needed here
+                rich_ticket_blocks = build_rich_ticket_blocks(transformed_ticket)
                 response_blocks.extend(rich_ticket_blocks)
         else:
             response_blocks.append({
@@ -813,23 +829,31 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
         similar_tickets_details_for_modal = []
         for ticket_result in top_similar_tickets_raw:
             metadata = ticket_result.get("metadata", {})
-            problem_statement = ticket_result.get("page_content") 
-            solution_summary = metadata.get("retrieved_solution_summary")
-            if not problem_statement:
-                problem_statement = metadata.get("retrieved_problem_statement", "_(Problem details not found)_")
-            if not solution_summary:
-                solution_summary = "_(Resolution details not found)_";
+            
+            # Explicitly prioritize metadata.retrieved_problem_statement
+            problem_statement_for_display = metadata.get("retrieved_problem_statement")
+
+            # If that's empty, try page_content (which should ideally be the same)
+            if not problem_statement_for_display:
+                problem_statement_for_display = ticket_result.get("page_content")
+            
+            # If both are empty, fall back to the original ticket summary
+            if not problem_statement_for_display:
+                problem_statement_for_display = metadata.get("summary", "_(Problem details not found)_")
+
+            # For solution, keep existing logic
+            solution_summary_for_display = metadata.get("retrieved_solution_summary", "_(Resolution details not found)_")
             
             transformed_ticket = {
                 'key': metadata.get('ticket_id', 'N/A'),
-                'url': metadata.get('url'),
-                'summary': metadata.get('summary', '_(Original summary missing)_'),
+                'url': metadata.get('url'), # UI helper will construct if this is missing/nan
+                'summary': metadata.get('summary', '_(Original summary missing)_'), # Original summary for title/link text
                 'status': metadata.get('status', '_Status N/A_'),
                 'priority': metadata.get('priority', ''),
                 'assignee': metadata.get('assignee', ''),
                 'issue_type': metadata.get('issue_type', ''),
-                'retrieved_problem_statement': problem_statement,
-                'retrieved_solution_summary': solution_summary
+                'retrieved_problem_statement': problem_statement_for_display,
+                'retrieved_solution_summary': solution_summary_for_display
             }
             similar_tickets_details_for_modal.append(transformed_ticket)
         
@@ -1101,16 +1125,16 @@ if __name__ == "__main__":
         #     # Parameters: project_key, total_tickets_to_scrape, api_batch_size
         #     scraped_count, total_available = scrape_and_store_tickets(
         #         project_key=project_key_to_scrape, 
-        #         total_tickets_to_scrape=500, # Changed from 2000 to 200
+        #         total_tickets_to_scrape=2000, # Changed from 2000 to 200
         #         api_batch_size=100
         #     )
         #     logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
 
-        #     if scraped_count > 0:
-        #         logger.info("Proceeding to Pinecone ingestion pipeline...")
-        #         run_ingestion_pipeline() # Call the ingestion pipeline
-        #     else:
-        #         logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
+            # if scraped_count > 0:
+                # logger.info("Proceeding to Pinecone ingestion pipeline...")
+        # run_ingestion_pipeline() # Call the ingestion pipeline
+            # else:
+                # logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
 
         # else:
         #     logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping and Pinecone ingestion on startup.")
@@ -1120,7 +1144,7 @@ if __name__ == "__main__":
         # Requires SLACK_APP_TOKEN (App-Level Token with connections:write scope)
         handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
         handler.start()
-    except KeyError as e:
-        logger.error(f"Missing environment variable: {e}. Ensure SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, and SLACK_APP_TOKEN are set in .env")
+    # except KeyError as e:
+    #     logger.error(f"Missing environment variable: {e}. Ensure SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, and SLACK_APP_TOKEN are set in .env")
     except Exception as e:
         logger.error(f"Error starting app: {e}") 

@@ -1,4 +1,5 @@
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,6 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) ->
 
     ticket_key = ticket_data.get('ticket_key', 'Unknown Ticket')
     summary = ticket_data.get('summary', 'No summary available')
-    url = ticket_data.get('url')
     status = ticket_data.get('status', 'N/A')
     priority = ticket_data.get('priority', 'N/A')
     assignee = ticket_data.get('assignee', 'Unassigned')
@@ -82,7 +82,16 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) ->
     type_emoji = get_issue_type_emoji(issue_type)
     priority_emoji = get_priority_emoji(priority)
 
-    ticket_link_text = f"*<{url}|{ticket_key}: {summary}>*" if url else f"*{ticket_key}: {summary}*"
+    constructed_url = None # Initialize
+    if ticket_key and ticket_key != 'Unknown Ticket' and ticket_key != 'N/A':
+        jira_server_base_url = os.environ.get("JIRA_SERVER", "")
+        if jira_server_base_url:
+            constructed_url = f"{jira_server_base_url.rstrip('/')}/browse/{ticket_key}"
+            logger.debug(f"Constructed URL on-the-fly for {ticket_key}: {constructed_url}")
+        else:
+            logger.warning(f"JIRA_SERVER env var not set, cannot construct URL for {ticket_key} on-the-fly.")
+
+    ticket_link_text = f"*<{constructed_url}|{ticket_key}: {summary}>*" if constructed_url else f"*{ticket_key}: {summary}*"
     blocks.append({
         "type": "section",
         "text": {"type": "mrkdwn", "text": ticket_link_text}
@@ -100,6 +109,4 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) ->
             "elements": action_elements
         })
     
-    blocks.append({"type": "divider"})
-
     return blocks 

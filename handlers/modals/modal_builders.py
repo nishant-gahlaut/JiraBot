@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 def build_similar_tickets_modal(similar_tickets_details: list):
     """Builds the modal view to display a list of similar tickets."""
     modal_blocks = []
-    modal_title = "Potentially Similar Tickets"
+    modal_title = "Similar Tickets" # Default short title
 
     if not similar_tickets_details:
         modal_blocks.append({
@@ -17,13 +17,22 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                 "text": "No similar tickets found or provided."
             }
         })
+        modal_title = "No Matches Found" # Specific, short title for no results
     else:
-        # Shorten the title text to comply with Slack's limit (max 24 chars)
         count = len(similar_tickets_details)
-        modal_title = f"{count} Similar Ticket{'s' if count != 1 else ''}" 
-        # Ensure title is definitely <= 24 chars, truncate if somehow still too long
-        if len(modal_title) > 24:
-            modal_title = modal_title[:24]
+        # Construct dynamic title
+        base_title = f"{count} Similar Ticket"
+        if count != 1:
+            base_title += "s"
+        
+        if len(base_title) <= 24:
+            modal_title = base_title
+        elif count > 99: # Example: if count is 3 digits or more, "99+ Similar" is short
+            modal_title = f"{count}+ Similar"
+            if len(modal_title) > 24: # If even that is too long (e.g. 9999+ Similar)
+                modal_title = "Many Similar Tickets" # Fallback to a generic short title
+        else: # Fallback to simple truncation for counts like 10-99 if they make it too long
+            modal_title = base_title[:24]
             
         for ticket in similar_tickets_details:
             try:
@@ -46,33 +55,66 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                 if rich_blocks and rich_blocks[-1].get("type") == "divider":
                     rich_blocks.pop()
                 modal_blocks.extend(rich_blocks)
-                
-                # --- 2. Problem Summary ---
-                problem_summary = ticket.get('retrieved_problem_statement', '_(Problem summary not available)_')
+
+                # ADDED: Subtle spacer block between rich ticket details and Problem section
                 modal_blocks.append({
                     "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Problem:* {problem_summary}"
-                        }
-                    ]
+                    "elements": [{"type": "mrkdwn", "text": " "}] # Non-breaking space or just a space
                 })
 
-                # --- 3. Solution Summary ---
-                solution_summary = ticket.get('retrieved_solution_summary', '_(Resolution summary not available)_')
-                modal_blocks.append({
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Resolution:* {solution_summary}"
-                        }
-                    ]
-                })
+                # --- 2. Problem Summary --- Change to context block for smaller font
+                problem_summary_text = ticket.get('retrieved_problem_statement', '_(Problem summary not available)_')
+                if problem_summary_text and problem_summary_text != '_(Problem summary not available)_':
+                    problem_lines = [f"> {line.strip()}" for line in problem_summary_text.split('\n') if line.strip()]
+                    quoted_problem_summary = "\n".join(problem_lines)
+                    modal_blocks.append({
+                        "type": "context", # CHANGED to context
+                        "elements": [ # Context block uses elements array
+                            {
+                                "type": "mrkdwn",
+                                "text": f"💡 *Problem:*\n{quoted_problem_summary}"
+                            }
+                        ]
+                    })
 
-                # --- Divider ---
-                modal_blocks.append({"type": "divider"})
+                # --- 3. Solution Summary --- Change to context block for smaller font
+                solution_summary_raw = ticket.get('retrieved_solution_summary', '_(Resolution summary not available)_')
+                if solution_summary_raw and solution_summary_raw != '_(Resolution summary not available)_':
+                    lines = []
+                    if any(solution_summary_raw.strip().startswith(p) for p in ["- ", "* ", "1. "]): 
+                        lines = [line.strip() for line in solution_summary_raw.split('\n') if line.strip()]
+                        formatted_solution_summary = "\n".join([f"> {line}" for line in lines]) # Keep blockquote
+                    else:
+                        lines = [line.strip() for line in solution_summary_raw.split('\n') if line.strip()]
+                        formatted_solution_summary = "\n".join([f"> • {line}" for line in lines]) # Add Slack bullets and blockquote
+                    
+                    if formatted_solution_summary:
+                        modal_blocks.append({
+                            "type": "context", # CHANGED to context
+                            "elements": [ # Context block uses elements array
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"🛠️ *Resolution:*\n{formatted_solution_summary}"
+                                }
+                            ]
+                        })
+                    elif solution_summary_raw:
+                        raw_solution_lines = [f"> {line.strip()}" for line in solution_summary_raw.split('\n') if line.strip()]
+                        quoted_raw_solution = "\n".join(raw_solution_lines)
+                        modal_blocks.append({
+                            "type": "context", # CHANGED to context
+                            "elements": [ # Context block uses elements array
+                                {
+                                    "type": "mrkdwn",
+                                    "text": f"🛠️ *Resolution:*\n{quoted_raw_solution}"
+                                }
+                            ]
+                        })
+
+                # --- Divider between entire tickets ---
+                # Add a divider only if it's not the last ticket to avoid trailing divider
+                if similar_tickets_details.index(ticket) < len(similar_tickets_details) - 1:
+                    modal_blocks.append({"type": "divider"})
 
             except Exception as e:
                 logger.error(f"Error building blocks for similar ticket {ticket.get('key', 'N/A')}: {e}", exc_info=True)
@@ -85,9 +127,9 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                 })
                 modal_blocks.append({"type": "divider"})
         
-        # Remove the last divider if tickets were added
-        if modal_blocks and modal_blocks[-1].get("type") == "divider":
-            modal_blocks.pop()
+        # Remove the last divider if tickets were added (This logic might be redundant now or needs adjustment)
+        # if modal_blocks and modal_blocks[-1].get("type") == "divider":
+        #     modal_blocks.pop()
 
     # Limit blocks to Slack's maximum (100)
     if len(modal_blocks) > 100:

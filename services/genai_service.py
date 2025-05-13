@@ -606,7 +606,7 @@ def generate_concise_problem_statements_batch(batch_data: List[Dict[str, Any]], 
     # --- End Token Counting ---
 
     # --- Retry Logic ---
-    max_retries = 10
+    max_retries = 3
     final_results = None
 
     for attempt in range(max_retries):
@@ -760,7 +760,7 @@ def generate_concise_solutions_batch(batch_data: List[Dict[str, Any]]) -> List[s
         logger.warning(f"High token count ({prompt_token_count}) detected for batch solution LLM call. Consider reducing LLM_BATCH_SIZE or comment length.")
 
     # --- Retry Logic ---
-    max_retries = 10
+    max_retries = 3
     final_results = None
 
     for attempt in range(max_retries):
