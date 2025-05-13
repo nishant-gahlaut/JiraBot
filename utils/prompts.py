@@ -106,11 +106,11 @@ Please act as a helpful Jira assistant. Analyze the conversation and generate th
 3.  "refined_description": A well-structured Jira ticket description, including key details from the conversation. If the conversation is very short and is already a good description, you can use that.
 
 Your response MUST be only the JSON object, like this:
-{
+{{
   "thread_summary": "summary of the thread...",
   "suggested_title": "suggested ticket title...",
   "refined_description": "refined ticket description..."
-}
+}}
 """
 
 # New prompt for generating ticket components from a user-provided description

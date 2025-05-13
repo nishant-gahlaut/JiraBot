@@ -81,7 +81,7 @@ from handlers.modals.interaction_handlers import build_create_ticket_modal
 from services.jira_service import create_jira_ticket
 from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options
 # Import AI title/description generators
-from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread, generate_ticket_components_from_description
+from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread, generate_ticket_components_from_description, summarize_thread
 # Import UI helpers
 from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 
@@ -701,7 +701,152 @@ def handle_description_capture_submission(ack, body, client, view, logger):
         # A simple log is the safest if we can't guarantee view_id validity after an error.
 
 
-# --- Message Shortcut Handler ---
+# --- Shortcut Handler for "Check Similar Issues" ---
+@app.shortcut("check_similar_issues_shortcut")
+def handle_check_similar_issues_shortcut(ack, shortcut, client, logger):
+    ack()  # Acknowledge immediately
+
+    trigger_id = shortcut["trigger_id"]
+    user_id = shortcut["user"]["id"]
+    channel_id = shortcut["channel"]["id"]
+    message_data = shortcut["message"]
+    message_context_ts = message_data["ts"] 
+    thread_parent_ts = message_data.get("thread_ts", message_context_ts)
+    
+    logger.info(f"'Check Similar Issues' shortcut: User {user_id} in channel {channel_id}, on message {message_context_ts}, for thread {thread_parent_ts}.")
+    loading_view_id = None
+
+    try:
+        loading_view_payload = build_loading_modal_view("⏳ Analyzing thread and searching for similar issues...")
+        loading_modal_response = client.views_open(
+            trigger_id=trigger_id,
+            view=loading_view_payload
+        )
+        loading_view_id = loading_modal_response["view"]["id"]
+        logger.info(f"Opened loading modal {loading_view_id} for 'Check Similar Issues' for user {user_id}.")
+
+        # Phase 2: Submit to Executor (UNCOMMENTED)
+        app_executor.submit(
+            _task_check_similar_from_thread_and_display, # Target function for background task
+            client=client,
+            logger=logger,
+            loading_view_id=loading_view_id,
+            channel_id=channel_id, # Pass for fetching replies
+            thread_parent_ts=thread_parent_ts, # Pass for fetching replies
+            user_id=user_id # For logging or context if needed by the task
+        )
+        logger.info(f"Submitted background task for {loading_view_id} to check similar issues from thread.")
+
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_check_similar_issues_shortcut: {e.response['error']}", exc_info=True)
+        if loading_view_id:
+            try:
+                error_view = build_loading_modal_view(f"A Slack API error occurred: {e.response['error']}. Please try again.")
+                client.views_update(view_id=loading_view_id, view=error_view)
+            except Exception as e_update:
+                logger.error(f"Failed to update loading modal with Slack API error: {e_update}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_check_similar_issues_shortcut: {e}", exc_info=True)
+        if loading_view_id:
+            try:
+                error_view = build_loading_modal_view("An unexpected error occurred. Please try again.")
+                client.views_update(view_id=loading_view_id, view=error_view)
+            except Exception as e_update:
+                logger.error(f"Failed to update loading modal with general error: {e_update}")
+
+
+# Phase 3: Implement the Background Task Function
+def _task_check_similar_from_thread_and_display(client, logger, loading_view_id, channel_id, thread_parent_ts, user_id):
+    logger.info(f"Background task started for {loading_view_id}: Checking similar issues from thread {thread_parent_ts} for user {user_id}.")
+    final_view_payload = None
+    try:
+        # 1. Fetch Thread Content
+        all_thread_messages = []
+        cursor = None
+        while True:
+            result = client.conversations_replies(
+                channel=channel_id,
+                ts=thread_parent_ts,
+                limit=200, # Max limit per call
+                cursor=cursor
+            )
+            all_thread_messages.extend(result.get('messages', []))
+            if not result.get('has_more'):
+                break
+            cursor = result.get('response_metadata', {}).get('next_cursor')
+        
+        if not all_thread_messages:
+            logger.warning(f"No messages found in thread {thread_parent_ts} for similarity check.")
+            final_view_payload = build_similar_tickets_modal([]) # Show empty results modal
+            client.views_update(view_id=loading_view_id, view=final_view_payload)
+            return
+
+        # 2. Format Messages
+        # Assuming format_messages_for_summary expects client as an argument if it needs to fetch user names
+        formatted_conversation = format_messages_for_summary(all_thread_messages, client)
+        if not formatted_conversation:
+            logger.warning(f"Formatted conversation is empty for thread {thread_parent_ts}.")
+            final_view_payload = build_similar_tickets_modal([])
+            client.views_update(view_id=loading_view_id, view=final_view_payload)
+            return
+
+        # 3. Generate AI Summary of the Thread
+        logger.info(f"Generating AI summary for thread {thread_parent_ts} (first 100 chars of formatted: '{formatted_conversation[:100]}...')")
+        thread_ai_summary = summarize_thread(formatted_conversation)
+
+        if not thread_ai_summary or thread_ai_summary.startswith("Error:"):
+            logger.error(f"Failed to generate AI summary for thread {thread_parent_ts}. AI response: {thread_ai_summary}")
+            error_message_for_modal = "Sorry, I couldn't summarize the thread to find similar issues." 
+            if thread_ai_summary: # Append AI's error if available
+                error_message_for_modal += f" (Details: {thread_ai_summary[:100]})"
+            final_view_payload = build_loading_modal_view(error_message_for_modal)
+            client.views_update(view_id=loading_view_id, view=final_view_payload)
+            return
+        
+        logger.info(f"AI summary for thread {thread_parent_ts}: '{thread_ai_summary[:100]}...'")
+
+        # 4. Find Similar Tickets
+        duplicate_results = find_and_summarize_duplicates(user_query=thread_ai_summary)
+        top_similar_tickets_raw = duplicate_results.get("tickets", [])
+
+        # 5. Prepare and Display Results
+        similar_tickets_details_for_modal = []
+        for ticket_result in top_similar_tickets_raw:
+            metadata = ticket_result.get("metadata", {})
+            problem_statement = ticket_result.get("page_content") 
+            solution_summary = metadata.get("retrieved_solution_summary")
+            if not problem_statement:
+                problem_statement = metadata.get("retrieved_problem_statement", "_(Problem details not found)_")
+            if not solution_summary:
+                solution_summary = "_(Resolution details not found)_";
+            
+            transformed_ticket = {
+                'key': metadata.get('ticket_id', 'N/A'),
+                'url': metadata.get('url'),
+                'summary': metadata.get('summary', '_(Original summary missing)_'),
+                'status': metadata.get('status', '_Status N/A_'),
+                'priority': metadata.get('priority', ''),
+                'assignee': metadata.get('assignee', ''),
+                'issue_type': metadata.get('issue_type', ''),
+                'retrieved_problem_statement': problem_statement,
+                'retrieved_solution_summary': solution_summary
+            }
+            similar_tickets_details_for_modal.append(transformed_ticket)
+        
+        final_view_payload = build_similar_tickets_modal(similar_tickets_details_for_modal)
+        client.views_update(view_id=loading_view_id, view=final_view_payload)
+        logger.info(f"Updated modal {loading_view_id} with {len(similar_tickets_details_for_modal)} similar tickets found for thread {thread_parent_ts}.")
+
+    except Exception as e:
+        logger.error(f"Error in background task _task_check_similar_from_thread_and_display for {loading_view_id}: {e}", exc_info=True)
+        try:
+            error_view = build_loading_modal_view("Sorry, an unexpected error occurred while checking for similar issues.")
+            client.views_update(view_id=loading_view_id, view=error_view)
+        except Exception as e_update:
+            logger.error(f"Failed to update modal {loading_view_id} with error from background task: {e_update}")
+
+
+# --- Existing Shortcut Handler for Create Ticket from Thread ---
 @app.shortcut("create_ticket_from_thread_message_action")
 def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
     ack()  # Acknowledge immediately
