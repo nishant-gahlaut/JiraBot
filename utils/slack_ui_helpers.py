@@ -64,6 +64,7 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) ->
             'priority': (str, optional) The ticket priority name.
             'assignee': (str, optional) The display name of the assignee.
             'issue_type': (str, optional) The name of the issue type.
+            'owned_by_team': (str, optional) The name of the team that owns the ticket.
         action_elements (list, optional): A list of Slack action elements (buttons)
                                           to append to the ticket display.
 
@@ -78,6 +79,7 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) ->
     priority = ticket_data.get('priority', 'N/A')
     assignee = ticket_data.get('assignee', 'Unassigned')
     issue_type = ticket_data.get('issue_type', 'N/A')
+    owned_by_team = ticket_data.get('owned_by_team', 'N/A')
 
     type_emoji = get_issue_type_emoji(issue_type)
     priority_emoji = get_priority_emoji(priority)
@@ -97,11 +99,26 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) ->
         "text": {"type": "mrkdwn", "text": ticket_link_text}
     })
 
-    details_text = f"{type_emoji} *Type:* {issue_type}    {priority_emoji} *Priority:* {priority}\n👤 *Assignee:* {assignee}    📉 *Status:* {status}"
-    blocks.append({
-        "type": "context",
-        "elements": [{"type": "mrkdwn", "text": details_text}]
-    })
+    details_elements = []
+    if status and status != 'N/A':
+        details_elements.append(f"📉 *Status:* {status}")
+    if assignee and assignee != 'Unassigned':
+        details_elements.append(f"👤 *Assignee:* {assignee}")
+    if priority and priority != 'N/A':
+        details_elements.append(f"{priority_emoji} *Priority:* {priority}")
+    
+    # DEBUG log for owned_by_team value inside the helper
+    logger.info(f"DEBUG UI HELPER: ticket_key={ticket_key}, owned_by_team='{owned_by_team}', type={type(owned_by_team)}, not_NA={owned_by_team != 'N/A'}")
+
+    if owned_by_team and owned_by_team != 'N/A':
+        details_elements.append(f"👥 *Team:* {owned_by_team}")
+    
+    if details_elements:
+        details_text = "    ".join(details_elements) # Join with multiple spaces for separation
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": details_text}]
+        })
 
     if action_elements and isinstance(action_elements, list) and len(action_elements) > 0:
         blocks.append({

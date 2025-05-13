@@ -48,7 +48,7 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                     # e.g., 'priority', 'assignee', 'issue_type' 
                     'priority': ticket.get('priority', ''), # Assuming priority name is passed
                     'assignee': ticket.get('assignee', ''), # Assuming assignee name is passed
-                    'issue_type': ticket.get('issue_type', '') # Assuming issue type name is passed
+                    'owned_by_team': ticket.get('owned_by_team', 'N/A') # ADDED owned_by_team from the iterated ticket
                 }
                 # Generate the rich block, but remove the default divider it might add
                 rich_blocks = build_rich_ticket_blocks(ticket_data_for_rich_block)
@@ -62,22 +62,32 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                     "elements": [{"type": "mrkdwn", "text": " "}] # Non-breaking space or just a space
                 })
 
-                # --- 2. Problem Summary --- Change to context block for smaller font
+                # --- 2. Problem Summary --- Title as section, description as context
                 problem_summary_text = ticket.get('retrieved_problem_statement', '_(Problem summary not available)_')
                 if problem_summary_text and problem_summary_text != '_(Problem summary not available)_':
                     problem_lines = [f"> {line.strip()}" for line in problem_summary_text.split('\n') if line.strip()]
                     quoted_problem_summary = "\n".join(problem_lines)
+                    # Title as a section block
                     modal_blocks.append({
-                        "type": "context", # CHANGED to context
-                        "elements": [ # Context block uses elements array
-                            {
-                                "type": "mrkdwn",
-                                "text": f"💡 *Problem:*\n{quoted_problem_summary}"
-                            }
-                        ]
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": "💡 *Problem:*"
+                        }
                     })
+                    # Description as a context block
+                    if quoted_problem_summary: # Ensure we add this block only if there is a description
+                        modal_blocks.append({
+                            "type": "context", 
+                            "elements": [
+                                {
+                                    "type": "mrkdwn",
+                                    "text": quoted_problem_summary
+                                }
+                            ]
+                        })
 
-                # --- 3. Solution Summary --- Change to context block for smaller font
+                # --- 3. Solution Summary --- Title as section, description as context
                 solution_summary_raw = ticket.get('retrieved_solution_summary', '_(Resolution summary not available)_')
                 if solution_summary_raw and solution_summary_raw != '_(Resolution summary not available)_':
                     lines = []
@@ -89,27 +99,46 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                         formatted_solution_summary = "\n".join([f"> • {line}" for line in lines]) # Add Slack bullets and blockquote
                     
                     if formatted_solution_summary:
+                        # Title as a section block
                         modal_blocks.append({
-                            "type": "context", # CHANGED to context
-                            "elements": [ # Context block uses elements array
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🛠️ *Resolution:*"
+                            }
+                        })
+                        # Description as a context block
+                        modal_blocks.append({
+                            "type": "context", 
+                            "elements": [
                                 {
                                     "type": "mrkdwn",
-                                    "text": f"🛠️ *Resolution:*\n{formatted_solution_summary}"
+                                    "text": formatted_solution_summary
                                 }
                             ]
                         })
-                    elif solution_summary_raw:
+                    elif solution_summary_raw: # Fallback for raw solution if formatting failed but raw exists
                         raw_solution_lines = [f"> {line.strip()}" for line in solution_summary_raw.split('\n') if line.strip()]
                         quoted_raw_solution = "\n".join(raw_solution_lines)
+                        # Title as a section block
                         modal_blocks.append({
-                            "type": "context", # CHANGED to context
-                            "elements": [ # Context block uses elements array
-                                {
-                                    "type": "mrkdwn",
-                                    "text": f"🛠️ *Resolution:*\n{quoted_raw_solution}"
-                                }
-                            ]
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "🛠️ *Resolution:*"
+                            }
                         })
+                        # Description as a context block
+                        if quoted_raw_solution: # Ensure we add this block only if there is a description
+                            modal_blocks.append({
+                                "type": "context", 
+                                "elements": [
+                                    {
+                                        "type": "mrkdwn",
+                                        "text": quoted_raw_solution
+                                    }
+                                ]
+                            })
 
                 # --- Divider between entire tickets ---
                 # Add a divider only if it's not the last ticket to avoid trailing divider

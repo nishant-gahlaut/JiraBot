@@ -520,6 +520,8 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
 
             for ticket_result in top_tickets:
                 metadata = ticket_result.get("metadata", {})
+                # TEMP LOG to check owned_by_team value from metadata
+                logger.info(f"DEBUG METADATA ({metadata.get('ticket_id')}): owned_by_team raw value = '{metadata.get('owned_by_team')}', type = {type(metadata.get('owned_by_team'))}")
                 
                 # Explicitly prioritize metadata.retrieved_problem_statement
                 problem_statement_for_display = metadata.get("retrieved_problem_statement")
@@ -542,7 +544,7 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
                     'status': metadata.get('status', '_Status N/A_'),
                     'priority': metadata.get('priority', ''),
                     'assignee': metadata.get('assignee', ''),
-                    'issue_type': metadata.get('issue_type', ''),
+                    'owned_by_team': metadata.get('owned_by_team', 'N/A'),
                     'retrieved_problem_statement': problem_statement_for_display,
                     'retrieved_solution_summary': solution_summary_for_display
                 }
@@ -830,6 +832,9 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
         for ticket_result in top_similar_tickets_raw:
             metadata = ticket_result.get("metadata", {})
             
+            # TEMP LOG to check owned_by_team value from metadata
+            logger.info(f"DEBUG METADATA ({metadata.get('ticket_id')}): owned_by_team raw value = '{metadata.get('owned_by_team')}', type = {type(metadata.get('owned_by_team'))}")
+            
             # Explicitly prioritize metadata.retrieved_problem_statement
             problem_statement_for_display = metadata.get("retrieved_problem_statement")
 
@@ -851,7 +856,7 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
                 'status': metadata.get('status', '_Status N/A_'),
                 'priority': metadata.get('priority', ''),
                 'assignee': metadata.get('assignee', ''),
-                'issue_type': metadata.get('issue_type', ''),
+                'owned_by_team': metadata.get('owned_by_team', 'N/A'),
                 'retrieved_problem_statement': problem_statement_for_display,
                 'retrieved_solution_summary': solution_summary_for_display
             }
@@ -1022,7 +1027,7 @@ def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summa
                 'status': metadata.get('status', '_Status N/A_'),
                 'priority': metadata.get('priority', ''),
                 'assignee': metadata.get('assignee', ''),
-                'issue_type': metadata.get('issue_type', ''),
+                'owned_by_team': metadata.get('owned_by_team', 'N/A'),
                 'retrieved_problem_statement': problem_statement,
                 'retrieved_solution_summary': solution_summary
             }
