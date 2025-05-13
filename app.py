@@ -81,13 +81,13 @@ from handlers.modals.interaction_handlers import build_create_ticket_modal
 from services.jira_service import create_jira_ticket
 from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options
 # Import AI title/description generators
-from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread
+from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread, generate_ticket_components_from_description
 # Import UI helpers
 from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 
 # Import the duplicate detection service
 from services.duplicate_detection_service import find_and_summarize_duplicates,find_and_summarize_duplicatessss
-from handlers.modals.modal_builders import build_similar_tickets_modal, build_loading_modal_view
+from handlers.modals.modal_builders import build_similar_tickets_modal, build_loading_modal_view, build_description_capture_modal
 
 # Load environment variables from .env file
 load_dotenv()
@@ -630,6 +630,76 @@ def handle_mention_confirm_open_create_form(ack, body, client, logger):
 def handle_modal_submission(ack, body, client, view, logger): # This is the app's view handler
     # This now calls the imported and aliased handler
     imported_handle_modal_submission(ack, body, client, view, logger)
+
+# --- NEW View Submission Handler for Description Capture Modal ---
+@app.view("description_capture_modal_submission")
+def handle_description_capture_submission(ack, body, client, view, logger):
+    logger.info("Received description_capture_modal_submission.")
+    
+    view_id = view["id"]
+    user_id = body["user"]["id"]
+
+    try:
+        user_provided_description = view["state"]["values"]["issue_description_block"]["issue_description_input"]["value"]
+        initial_private_metadata_str = view.get("private_metadata", "{}")
+        initial_metadata = json.loads(initial_private_metadata_str)
+
+        channel_id = initial_metadata.get("channel_id")
+        thread_ts = initial_metadata.get("thread_ts")
+
+        if not user_provided_description or user_provided_description.isspace():
+            logger.warning("User submitted empty description in description_capture_modal.")
+            error_view_payload = build_description_capture_modal(private_metadata=initial_private_metadata_str)
+            error_view_payload["blocks"].append({"type": "section", "text": {"type": "mrkdwn", "text": ":warning: Description cannot be empty."}})
+            ack({"response_action": "update", "view": error_view_payload}) # Ack with update for error
+            return
+
+        logger.info(f"User {user_id} submitted description: '{user_provided_description[:100]}...'")
+
+        # --- Update to Loading State via ack with response_action --- 
+        loading_view_payload = build_loading_modal_view("🤖 Generating AI suggestions for your ticket... please wait.")
+        ack({
+            "response_action": "update",
+            "view": loading_view_payload
+        })
+        logger.info(f"Ack'd and updated modal {view_id} to loading state.")
+
+        # --- Call GenAI Service (ack has already happened) ---
+        ai_components = generate_ticket_components_from_description(user_provided_description)
+        
+        ai_suggested_title = ai_components.get("suggested_title", "")
+        ai_refined_description = ai_components.get("refined_description", user_provided_description)
+        ai_issue_summary = ai_components.get("issue_summary", "")
+
+        if not ai_issue_summary or ai_issue_summary.startswith("Error:") or ai_issue_summary.startswith("Could not"):
+            logger.warning(f"AI failed to generate a usable issue_summary. Fallback used. Summary: {ai_issue_summary}")
+            ai_issue_summary = ai_refined_description if (not ai_issue_summary or ai_issue_summary.startswith("Error:")) and ai_refined_description else user_provided_description
+
+        final_private_metadata = initial_metadata.copy()
+        final_private_metadata["thread_summary"] = ai_issue_summary
+        final_private_metadata_str = json.dumps(final_private_metadata)
+
+        final_jira_modal_view = build_create_ticket_modal(
+            initial_summary=ai_suggested_title,
+            initial_description=ai_refined_description,
+            private_metadata=final_private_metadata_str
+        )
+        
+        # --- Second update uses client.views_update --- 
+        client.views_update(view_id=view_id, view=final_jira_modal_view)
+        logger.info(f"Updated modal {view_id} to full Jira creation form for user {user_id} with AI suggestions.")
+
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_description_capture_submission: {e.response['error']}", exc_info=True)
+        # Don't try to ack again here. If the first ack with update failed, or if error is after, 
+        # we might not be able to update the view if the view_id is truly gone.
+        # Just log the error. The user might see a generic error on Slack or the modal might be stuck.
+        # If the error was 'not_found' on the ack(update), it's tricky.
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_description_capture_submission: {e}", exc_info=True)
+        # Similar to above, updating the view here might fail if view_id is not_found.
+        # A simple log is the safest if we can't guarantee view_id validity after an error.
+
 
 # --- Message Shortcut Handler ---
 @app.shortcut("create_ticket_from_thread_message_action")

@@ -5,44 +5,61 @@ from slack_sdk.errors import SlackApiError
 from utils.state_manager import conversation_states
 from services.genai_service import generate_ticket_title_and_description_from_text
 from handlers.modals.interaction_handlers import build_create_ticket_modal
+from ..modals.modal_builders import build_description_capture_modal
 
 logger = logging.getLogger(__name__)
 
-def handle_create_ticket_action(ack, body, client, logger):
-    """Handles the 'Create Ticket' button click by asking for initial summary/description."""
-    ack() # Acknowledge the button click immediately
-    logger.info("'Create Ticket' button clicked. Asking for initial description.")
-
+def handle_create_ticket_action(ack, body, client, logger_param):
+    """Handles the 'Create Ticket' button click from initial assistant CTAs."""
+    ack()
     user_id = body["user"]["id"]
     channel_id = body["channel"]["id"]
-    thread_ts = body["message"]["thread_ts"]
-    assistant_id = body.get("assistant", {}).get("id") # Get assistant_id if available
+    thread_ts = body["message"].get("thread_ts") # Might be None if button is not in a thread
+    trigger_id = body["trigger_id"]
 
-    # Set state to await the user's initial description
-    conversation_states[thread_ts] = {
-        "step": "awaiting_initial_summary",
-        "user_id": user_id,
-        "channel_id": channel_id,
-        "assistant_id": assistant_id,
-        "data": {}
-    }
-    logger.info(f"Set state for thread {thread_ts} to 'awaiting_initial_summary'")
+    logger_param.info(f"'Create Ticket' button clicked by user {user_id} in channel {channel_id}. Trigger ID: {trigger_id}")
 
-    # Ask for the initial description
     try:
-        client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=thread_ts,
-            text="Okay, let's start creating a Jira ticket. Please describe the issue or request:"
+        # Prepare private_metadata for the description capture modal
+        initial_context = {
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "thread_ts": thread_ts, # Store even if None, for consistency
+            "flow_origin": "create_ticket_button"
+        }
+        private_metadata_str = json.dumps(initial_context)
+
+        description_modal_view = build_description_capture_modal(private_metadata=private_metadata_str)
+        
+        client.views_open(
+            trigger_id=trigger_id,
+            view=description_modal_view
         )
-        if assistant_id:
-            client.assistant_threads_setStatus(
-                assistant_id=assistant_id,
-                thread_ts=thread_ts,
-                status=""
+        logger_param.info(f"Opened description capture modal for user {user_id}.")
+
+    except SlackApiError as e:
+        logger_param.error(f"Slack API error opening description modal: {e.response['error']}", exc_info=True)
+        # Try to send an ephemeral message if modal opening fails
+        try:
+            client.chat_postEphemeral(
+                channel=channel_id, 
+                user=user_id, 
+                thread_ts=thread_ts, 
+                text="Sorry, I couldn't open the form to create a ticket. Please try again."
             )
+        except Exception as e_ephemeral:
+            logger_param.error(f"Failed to send ephemeral error for description modal failure: {e_ephemeral}")
     except Exception as e:
-        logger.error(f"Error posting initial summary request: {e}")
+        logger_param.error(f"Unexpected error in handle_create_ticket_action: {e}", exc_info=True)
+        try:
+            client.chat_postEphemeral(
+                channel=channel_id, 
+                user=user_id, 
+                thread_ts=thread_ts, 
+                text="An unexpected error occurred. Please try again."
+            )
+        except Exception as e_ephemeral:
+            logger_param.error(f"Failed to send ephemeral error for unexpected error: {e_ephemeral}")
 
 def handle_continue_after_ai(ack, body, client, logger):
     """Handles the 'Continue' button click after AI suggestion. Opens the modal."""

@@ -139,4 +139,28 @@ def build_loading_modal_view(message="Processing your request..."):
         ],
     }
 
+def build_description_capture_modal(private_metadata: str = ""):
+    """Builds the Block Kit JSON for the initial modal to capture issue description."""
+    return {
+        "type": "modal",
+        "callback_id": "description_capture_modal_submission", # Unique callback_id
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "Describe Your Issue"},
+        "submit": {"type": "plain_text", "text": "Next"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "issue_description_block",
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "issue_description_input",
+                    "multiline": True,
+                    "placeholder": {"type": "plain_text", "text": "Please provide a detailed description of the Jira ticket you want to create..."}
+                },
+                "label": {"type": "plain_text", "text": "Issue Description"}
+            }
+        ]
+    }
+
 # ... other modal builder functions ... 

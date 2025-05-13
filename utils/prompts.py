@@ -96,32 +96,48 @@ JSON Output:"""
 
 # Prompt for generating Summary, Title, and Description from a thread (JSON output)
 GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT = """
-You are an AI assistant that extracts key information from a Slack thread to help create a Jira ticket.
+Given the following Slack thread conversation:
 
-**Task:**  
-Analyze the Slack thread conversation below (in chronological order, from oldest to newest) and generate the following:
-1. A *brief summary* of the overall thread for context.
-2. A *concise and action-oriented Jira ticket title* that captures the main issue or task.
-3. A *refined Jira ticket description* focusing on the core problem or task, ideally in either:
-   - Bullet points (for clarity), or
-   - 1-2 short paragraphs.
-
-**Requirements:**  
-- Focus only on the core actionable issue discussed.
-- Exclude greetings, emojis, or off-topic content.
-- Do *not* mention Slack or that this was a Slack conversation.
-- Output strictly a valid JSON object with the following keys:
-  - "thread_summary"
-  - "suggested_title"
-  - "refined_description"
-
-Slack Thread Conversation (chronological order):
----
 {slack_thread_conversation}
----
-JSON Output:
+
+Please act as a helpful Jira assistant. Analyze the conversation and generate the following components in a VALID JSON format:
+1.  "thread_summary": A concise summary of the entire thread, capturing the main problem and context.
+2.  "suggested_title": A clear and concise Jira ticket title based on the problem.
+3.  "refined_description": A well-structured Jira ticket description, including key details from the conversation. If the conversation is very short and is already a good description, you can use that.
+
+Your response MUST be only the JSON object, like this:
+{
+  "thread_summary": "summary of the thread...",
+  "suggested_title": "suggested ticket title...",
+  "refined_description": "refined ticket description..."
+}
 """
 
+# New prompt for generating ticket components from a user-provided description
+GENERATE_TICKET_COMPONENTS_FROM_DESCRIPTION_PROMPT = """\
+A user has provided the following description for a new Jira ticket:
+
+---
+{user_description}
+---
+
+Please act as a helpful Jira assistant. Analyze this description and generate the following components.
+Your response MUST be only a VALID JSON object with exactly these three keys:
+1.  `issue_summary`: A concise summary of the core issue described. This summary will be used for finding similar existing tickets.
+2.  `suggested_title`: A clear and concise Jira ticket title based on the user's description.
+3.  `refined_description`: A well-structured Jira ticket description. If the user's description is already good, you can use it directly or slightly enhance its formatting.
+
+Example of the required JSON output format:
+```json
+{{
+  "issue_summary": "concise summary of the core issue...",
+  "suggested_title": "suggested ticket title based on description...",
+  "refined_description": "refined ticket description based on user input..."
+}}
+```
+
+VALID JSON Output:
+"""
 
 # Prompt for processing a mention, understanding intent, and generating components (JSON output)
 PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """

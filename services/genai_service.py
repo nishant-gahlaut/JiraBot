@@ -19,7 +19,8 @@ from utils.prompts import (
     PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT,
     GENERATE_CONCISE_PROBLEM_STATEMENT_PROMPT,
     GENERATE_CONCISE_PROBLEM_STATEMENTS_BATCH_PROMPT, # ADDED IMPORT
-    GENERATE_CONCISE_SOLUTIONS_BATCH_PROMPT # ADDED IMPORT FOR NEW PROMPT
+    GENERATE_CONCISE_SOLUTIONS_BATCH_PROMPT, # ADDED IMPORT FOR NEW PROMPT
+    GENERATE_TICKET_COMPONENTS_FROM_DESCRIPTION_PROMPT # ADDED IMPORT FOR NEW PROMPT
 )
 
 logger = logging.getLogger(__name__)
@@ -262,6 +263,70 @@ def generate_ticket_components_from_thread(slack_thread_conversation: str) -> di
             "thread_summary": f"Unexpected error: {e}",
             "suggested_title": f"Unexpected error: {e}",
             "refined_description": f"Unexpected error: {e}"
+        }
+
+def generate_ticket_components_from_description(user_description: str) -> dict:
+    """
+    Generates issue summary, suggested Jira title, and refined Jira description from a user-provided description
+    in a single LLM call, expecting a JSON output.
+    """
+    if not user_description or user_description.isspace():
+        logger.warning("User description is empty. Cannot generate ticket components.")
+        return {
+            "issue_summary": "Could not summarize: Empty description input.",
+            "suggested_title": "Could not generate title: Empty description input.",
+            "refined_description": "Could not generate description: Empty description input."
+        }
+
+    prompt = GENERATE_TICKET_COMPONENTS_FROM_DESCRIPTION_PROMPT.format(user_description=user_description)
+    logger.info(f"Generating ticket components from description: '{user_description[:200]}...'")
+    
+    raw_llm_output = generate_text(prompt)
+
+    if isinstance(raw_llm_output, str) and raw_llm_output.startswith("Error:"):
+        logger.error(f"LLM call failed for component generation from description: {raw_llm_output}")
+        return {
+            "issue_summary": f"Error during summarization: {raw_llm_output}",
+            "suggested_title": f"Error during title generation: {raw_llm_output}",
+            "refined_description": f"Error during description generation: {raw_llm_output}"
+        }
+    
+    try:
+        cleaned_output = raw_llm_output.strip()
+        if cleaned_output.startswith("```json"):
+            cleaned_output = cleaned_output[len("```json"):].strip()
+        if cleaned_output.startswith("```"):
+            cleaned_output = cleaned_output[len("```"):].strip()
+        if cleaned_output.endswith("```"):
+            cleaned_output = cleaned_output[:-len("```")].strip()
+        
+        logger.debug(f"Cleaned LLM output for JSON parsing (from description): {cleaned_output}")
+        components = json.loads(cleaned_output)
+        
+        if not all(key in components for key in ["issue_summary", "suggested_title", "refined_description"]):
+            logger.error(f"LLM output (from description) parsed as JSON, but missing one or more required keys. Output: {components}")
+            missing_keys_message = "LLM output was missing some components."
+            return {
+                "issue_summary": components.get("issue_summary", missing_keys_message),
+                "suggested_title": components.get("suggested_title", missing_keys_message),
+                "refined_description": components.get("refined_description", missing_keys_message)
+            }
+        
+        logger.info("Successfully generated and parsed ticket components from description.")
+        return components
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON from LLM output (from description). Error: {e}. Output: '{raw_llm_output}'")
+        return {
+            "issue_summary": f"Error: AI response was not valid JSON. Raw: {raw_llm_output[:100]}...",
+            "suggested_title": f"Error: AI response was not valid JSON. Raw: {raw_llm_output[:100]}...",
+            "refined_description": f"Error: AI response was not valid JSON. Raw: {raw_llm_output[:100]}..."
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error processing LLM output (from description): {e}. Output: '{raw_llm_output}'")
+        return {
+            "issue_summary": f"Error: Unexpected issue processing AI response. Raw: {raw_llm_output[:100]}...",
+            "suggested_title": f"Error: Unexpected issue processing AI response. Raw: {raw_llm_output[:100]}...",
+            "refined_description": f"Error: Unexpected issue processing AI response. Raw: {raw_llm_output[:100]}..."
         }
 
 def generate_ticket_title_and_description_from_text(user_text: str) -> dict:
