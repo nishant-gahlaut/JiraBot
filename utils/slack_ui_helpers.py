@@ -51,7 +51,7 @@ def get_priority_emoji(priority_name: str) -> str:
     else:
         return "" # No emoji for unmatched or "None"
 
-def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None) -> list:
+def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, original_ticket_key: str = None) -> list:
     """
     Builds a list of Slack Block Kit blocks for a single richly formatted ticket.
 

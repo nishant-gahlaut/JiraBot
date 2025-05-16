@@ -356,3 +356,69 @@ def create_jira_ticket(ticket_data):
 # def fetch_jira_ticket_data(ticket_id): ...
 # def prepare_ticket_data_for_summary(raw_jira_issue, ticket_id): ...
 # def summarize_jira_ticket(ticket_data_for_summary): ... 
+
+def get_jira_ticket(ticket_key: str):
+    """Fetches and returns a more structured Jira ticket data."""
+    if not jira_client:
+        logger.error("Jira client is not initialized. Cannot get ticket.")
+        return None
+
+    logger.info(f"Getting Jira ticket details for: {ticket_key}")
+    try:
+        issue = _fetch_raw_ticket_from_jira(ticket_key)
+        if not issue:
+            return None
+
+        # Construct a dictionary with relevant fields
+        # This can be expanded based on what's needed by handle_link_selected_tickets
+        ticket_details = {
+            "key": issue.key,
+            "summary": issue.fields.summary if hasattr(issue.fields, 'summary') else None,
+            "description": issue.fields.description if hasattr(issue.fields, 'description') else None,
+            "status": issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else None,
+            "url": f"{JIRA_SERVER.rstrip('/')}/browse/{issue.key}" if JIRA_SERVER else None
+            # Add other fields as necessary
+        }
+        logger.info(f"Successfully retrieved and structured ticket details for {ticket_key}")
+        return ticket_details
+    except Exception as e:
+        logger.error(f"Error in get_jira_ticket for {ticket_key}: {e}", exc_info=True)
+        return None
+
+def update_jira_ticket(ticket_data: dict):
+    """Updates an existing Jira ticket."""
+    if not jira_client:
+        logger.error("Jira client is not initialized. Cannot update ticket.")
+        return False
+
+    ticket_key = ticket_data.get("key")
+    if not ticket_key:
+        logger.error("Ticket key not provided in ticket_data for update.")
+        return False
+
+    fields_to_update = {}
+    if "description" in ticket_data:
+        fields_to_update["description"] = ticket_data["description"]
+    # Add other fields that might need updating, e.g., summary, labels, etc.
+    # if "summary" in ticket_data:
+    # fields_to_update["summary"] = ticket_data["summary"]
+    # if "labels" in ticket_data: # Assuming labels are a list of strings
+    # fields_to_update["labels"] = ticket_data["labels"]
+
+
+    if not fields_to_update:
+        logger.info(f"No fields to update specified for ticket {ticket_key}.")
+        return True # No changes needed, consider it a success
+
+    logger.info(f"Attempting to update ticket {ticket_key} with fields: {fields_to_update.keys()}")
+    try:
+        issue = jira_client.issue(ticket_key)
+        issue.update(fields=fields_to_update)
+        logger.info(f"Successfully updated ticket {ticket_key}.")
+        return True
+    except JIRAError as e:
+        logger.error(f"JIRA API Error updating ticket {ticket_key}: Status {e.status_code} - {e.text}")
+        return False
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while updating {ticket_key}: {e}", exc_info=True)
+        return False

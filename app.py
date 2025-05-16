@@ -80,7 +80,7 @@ from handlers.mention_handler import handle_app_mention_event, fetch_conversatio
 
 # Import mention flow handlers
 from handlers.modals.interaction_handlers import build_create_ticket_modal
-from services.jira_service import create_jira_ticket
+from services.jira_service import create_jira_ticket, get_jira_ticket, update_jira_ticket
 from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options
 # Import AI title/description generators
 from services.genai_service import generate_suggested_title, generate_refined_description, generate_ticket_components_from_thread, generate_ticket_components_from_description, summarize_thread
@@ -931,7 +931,7 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
             logger.error(f"Failed to update modal {loading_view_id} with error from background task: {e_update}")
 
 
-# --- Existing Shortcut Handler for Create Ticket from Thread ---
+# --- Existing handler for Create Ticket from Thread ---
 @app.shortcut("create_ticket_from_thread_message_action")
 def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
     ack()  # Acknowledge immediately
@@ -1036,11 +1036,6 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
                 client.views_update(view_id=view_id, view=build_loading_modal_view(error_text))
             except Exception as e_update:
                  logger.error(f"Failed to update modal with Slack API error: {e_update}")
-        else:
-             try:
-                client.chat_postEphemeral(channel=channel_id, user=user_id_invoked, thread_ts=original_message_ts, text=error_text)
-             except Exception as e_ephemeral:
-                logger.error(f"Failed to send ephemeral error for Slack API error: {e_ephemeral}")
 
     except Exception as e:
         logger.error(f"Unexpected error in handle_create_ticket_from_thread: {e}", exc_info=True)
@@ -1059,7 +1054,7 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
 
 
 # --- Helper for background task ---
-def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summary, user_id, channel_id):
+def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summary, user_id, channel_id, source, original_ticket_key):
     logger.info(f"Background task started for view_id: {view_id}, finding similar tickets for user: {user_id}")
     final_view = None
     try:
@@ -1097,7 +1092,7 @@ def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summa
             # Update the modal to say no tickets were found
             final_view = build_similar_tickets_modal([]) # REVERTED: Removed thread_summary argument, pass empty list
         else:
-            final_view = build_similar_tickets_modal(similar_tickets_details_for_modal) # REVERTED: Removed thread_summary argument
+            final_view = build_similar_tickets_modal(similar_tickets_details_for_modal,channel_id,source, original_ticket_key) # REVERTED: Removed thread_summary argument
         
         client.views_update(view_id=view_id, view=final_view)
         logger.info(f"Updated modal {view_id} for user {user_id} with {len(similar_tickets_details_for_modal)} similar tickets.")
@@ -1116,19 +1111,21 @@ def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summa
 def handle_view_similar_tickets_action(ack, body, client, logger):
     logger.info(f"User {body['user']['id']} clicked 'View Similar Tickets' button.")
     ack() # Acknowledge the action immediately
-
+    source = "view_similar_tickets_action"  # Add source information
     trigger_id = body["trigger_id"]
     user_id = body["user"]["id"]
     channel_id = body["channel"]["id"] # For potential ephemeral messages
     action_details = body["actions"][0]
     button_value_str = action_details.get("value")
-
+    original_ticket_key = None # Initialize original_ticket_key
+    
     thread_summary = None
     if button_value_str:
         try:
             button_payload = json.loads(button_value_str)
             if isinstance(button_payload, dict):
                 thread_summary = button_payload.get("thread_summary")
+                original_ticket_key = button_payload.get("original_ticket_key") # Extract original_ticket_key
             else:
                 logger.error(f"Button value was not a dictionary: {button_value_str}")
         except json.JSONDecodeError:
@@ -1160,7 +1157,9 @@ def handle_view_similar_tickets_action(ack, body, client, logger):
             loading_view_id, 
             thread_summary, 
             user_id,
-            channel_id # Pass channel_id if the task needs it for error reporting, though modal update is preferred
+            channel_id, # Pass channel_id if the task needs it for error reporting, though modal update is preferred
+            source,  # Pass the source to the task
+            original_ticket_key  # Pass original_ticket_key
         )
         logger.info(f"Submitted background task for view_id: {loading_view_id} to find similar tickets.")
 
@@ -1177,6 +1176,146 @@ def handle_view_similar_tickets_action(ack, body, client, logger):
             client.chat_postEphemeral(channel=channel_id, user=user_id, text="An unexpected error occurred. Please try again.")
         except Exception as e_post:
             logger.error(f"Failed to post ephemeral error for unexpected error: {e_post}")
+
+
+@app.view("similar_tickets_modal")
+def handle_similar_tickets_submission(ack, body, client, logger):
+    """Handles the submission of the similar tickets modal (e.g., when 'Link Selected Tickets' is clicked)."""
+    
+    view = body.get("view", {})
+    private_metadata_str = view.get("private_metadata", "{}")
+    user_id = body.get("user", {}).get("id")
+    # view_id_to_update = view.get("id") # Not strictly needed if acking with update
+
+    try:
+        private_metadata = json.loads(private_metadata_str)
+        original_ticket_key = private_metadata.get("original_ticket_key")
+        source_channel_id = private_metadata.get("channel_id") 
+        source_thread_ts = private_metadata.get("thread_ts")
+
+        if not original_ticket_key:
+            logger.error("Original ticket key not found in private metadata for linking.")
+            error_view = {
+                "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: Critical information (original ticket key) was missing. Cannot link tickets."}}],
+                "close": {"type": "plain_text", "text": "Close"}
+            }
+            ack({"response_action": "update", "view": error_view})
+            return
+
+        selected_ticket_keys = []
+        state_values = view.get("state", {}).get("values", {})
+        logger.debug(f"View state values for linking from similar_tickets_modal: {json.dumps(state_values, indent=2)}")
+
+        for block_id, block_content in state_values.items():
+            if block_id.startswith("input_link_ticket_"):
+                checkbox_action_id_key = list(block_content.keys())[0]
+                if checkbox_action_id_key.startswith("checkbox_action_"):
+                    selected_options = block_content[checkbox_action_id_key].get("selected_options", [])
+                    if selected_options:
+                        for option in selected_options:
+                            selected_ticket_keys.append(option["value"])
+        
+        logger.info(f"User {user_id} submitted similar_tickets_modal to link: {selected_ticket_keys} to original ticket: {original_ticket_key}")
+
+        if not selected_ticket_keys:
+            logger.info("No tickets were selected to link via similar_tickets_modal.")
+            error_view = {
+                "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: No tickets were selected. Please select at least one ticket to link."}}],
+                "close": {"type": "plain_text", "text": "Close"}
+            }
+            ack({"response_action": "update", "view": error_view})
+            return
+        
+        # REMOVED early ack() here. All ack() calls will now include a response_action.
+
+        original_ticket = get_jira_ticket(original_ticket_key)
+        if not original_ticket:
+            logger.error(f"Could not fetch original ticket {original_ticket_key} for linking (from view submission).")
+            error_view = {
+                "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: Sorry, I couldn't retrieve the details of the original ticket {original_ticket_key} to link to."}}],
+                "close": {"type": "plain_text", "text": "Close"}
+            }
+            ack({"response_action": "update", "view": error_view})
+            return
+
+        current_description = original_ticket.get("description", "")
+        linked_section_header = "\n\n---\n*Linked Tickets:*"
+        links_to_add_str = ""
+        newly_linked_count = 0
+        for ticket_key_to_link in selected_ticket_keys:
+            link_line = f"\n• {ticket_key_to_link}"
+            if not (linked_section_header in current_description and link_line in current_description):
+                links_to_add_str += link_line
+                newly_linked_count += 1
+
+        if newly_linked_count == 0:
+            logger.info(f"All selected tickets {selected_ticket_keys} already appear to be linked to {original_ticket_key} (from view submission).")
+            already_linked_view = {
+                "type": "modal", "title": {"type": "plain_text", "text": "Already Linked"},
+                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"It looks like the selected tickets are already linked to <{original_ticket.get('url')}|{original_ticket_key}>."}}],
+                "close": {"type": "plain_text", "text": "Close"}
+            }
+            ack({"response_action": "update", "view": already_linked_view})
+            return
+
+        updated_description = current_description
+        if linked_section_header not in updated_description:
+            updated_description += linked_section_header
+        updated_description += links_to_add_str
+        updated_description += "\n"
+
+        update_payload = {"key": original_ticket_key, "description": updated_description}
+        update_success = update_jira_ticket(update_payload)
+        
+        if update_success:
+            logger.info(f"Jira ticket link update successful for {original_ticket_key}. Updating modal with success.")
+            success_linking_modal_view = {
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "✅ Link Successful"},
+                "blocks": [{
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"Successfully linked {newly_linked_count} ticket(s) to <{original_ticket.get('url')}|{original_ticket_key}>!"}
+                }],
+                "close": {"type": "plain_text", "text": "Close"}
+            }
+            ack({"response_action": "update", "view": success_linking_modal_view})
+        else: # Jira update failed
+            logger.error(f"Jira ticket update for linking returned False for {original_ticket_key} (view submission). Updating modal with error.")
+            error_linking_modal_view = {
+                "type": "modal",
+                "title": {"type": "plain_text", "text": "⚠️ Link Failed"},
+                "blocks": [{
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"Sorry, there was an issue linking the tickets to <{original_ticket.get('url')}|{original_ticket_key}>. The Jira update failed."}
+                }],
+                "close": {"type": "plain_text", "text": "Close"}
+            }
+            ack({"response_action": "update", "view": error_linking_modal_view})
+
+    except Exception as e:
+        logger.error(f"Error in handle_similar_tickets_submission: {e}", exc_info=True)
+        # Generic error, update modal to show a generic error message
+        generic_error_view = {
+            "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: An unexpected error occurred while processing your request. Please try again."}}],
+            "close": {"type": "plain_text", "text": "Close"}
+        }
+        # Try to ack with an update, but if ack has already been called for this interaction (e.g. by a more specific error path),
+        # this might not work as intended or could error. However, view submissions should only be ack'd once.
+        try:
+            ack({"response_action": "update", "view": generic_error_view})
+        except Exception as ack_e: # Catching potential error if ack is called multiple times
+            logger.error(f"Failed to ack with generic error view, possibly ack already called: {ack_e}")
+            # Fallback: If acking with update fails, try to post an ephemeral message if possible.
+            # This is a last resort if the modal cannot be updated.
+            if source_channel_id and user_id:
+                 try:
+                    client.chat_postEphemeral(channel=source_channel_id, user=user_id, thread_ts=source_thread_ts, text="Sorry, an unexpected error occurred, and I couldn't update the dialog. Please try again.")
+                 except Exception as eph_e:
+                     logger.error(f"Failed to send fallback ephemeral message: {eph_e}")
 
 
 # --- Start the App ---

@@ -1,13 +1,21 @@
 import logging
 from utils.slack_ui_helpers import build_rich_ticket_blocks # Import the helper
+import json
 
 logger = logging.getLogger(__name__)
 
 # --- NEW MODAL BUILDER --- 
-def build_similar_tickets_modal(similar_tickets_details: list):
+def build_similar_tickets_modal(similar_tickets_details: list, channel_id: str = None, source: str = "unknown", original_ticket_key: str = None):
     """Builds the modal view to display a list of similar tickets."""
     modal_blocks = []
     modal_title = "Similar Tickets" # Default short title
+    private_metadata_payload = {"source": source, "channel_id": channel_id} # Initialize with source and channel_id
+    if original_ticket_key:
+        private_metadata_payload["original_ticket_key"] = original_ticket_key
+    # It's also crucial to pass channel_id and thread_ts if the link_selected_tickets action needs to post messages.
+    # Assuming they might come from the original context that triggered "View Similar Tickets"
+    # For now, these are not explicitly passed to build_similar_tickets_modal, so they won't be in private_metadata unless added.
+    # If they were part of the button_value that triggered this modal, that's another path.
 
     if not similar_tickets_details:
         modal_blocks.append({
@@ -51,7 +59,7 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                     'owned_by_team': ticket.get('owned_by_team', 'N/A') # ADDED owned_by_team from the iterated ticket
                 }
                 # Generate the rich block, but remove the default divider it might add
-                rich_blocks = build_rich_ticket_blocks(ticket_data_for_rich_block)
+                rich_blocks = build_rich_ticket_blocks(ticket_data_for_rich_block, source, original_ticket_key)
                 if rich_blocks and rich_blocks[-1].get("type") == "divider":
                     rich_blocks.pop()
                 modal_blocks.extend(rich_blocks)
@@ -140,6 +148,33 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                                 ]
                             })
 
+                # Add checkbox for view_similar_tickets_action source
+                if source == "view_similar_tickets_action":
+                    modal_blocks.append({
+                        "type": "input",  # Changed from "actions"
+                        "block_id": f"input_link_ticket_{ticket.get('key', 'N/A')}", # Unique block_id for input
+                        "label": {
+                            "type": "plain_text",
+                            "text": " ", # Minimal label (Slack requires a label for input blocks)
+                            "emoji": True
+                        },
+                        "element": {
+                            "type": "checkboxes",
+                            "options": [
+                                {
+                                    "text": {
+                                        "type": "plain_text",
+                                        "text": f"Link {ticket.get('key', 'N/A')}", # Clarified text
+                                        "emoji": True
+                                    },
+                                    "value": ticket.get('key', 'N/A')
+                                }
+                            ],
+                            "action_id": f"checkbox_action_{ticket.get('key', 'N/A')}" # Action_id for the checkbox element itself
+                        },
+                        "optional": True # Allows submission even if none are checked
+                    })
+
                 # --- Divider between entire tickets ---
                 # Add a divider only if it's not the last ticket to avoid trailing divider
                 if similar_tickets_details.index(ticket) < len(similar_tickets_details) - 1:
@@ -155,10 +190,6 @@ def build_similar_tickets_modal(similar_tickets_details: list):
                     }
                 })
                 modal_blocks.append({"type": "divider"})
-        
-        # Remove the last divider if tickets were added (This logic might be redundant now or needs adjustment)
-        # if modal_blocks and modal_blocks[-1].get("type") == "divider":
-        #     modal_blocks.pop()
 
     # Limit blocks to Slack's maximum (100)
     if len(modal_blocks) > 100:
@@ -177,6 +208,8 @@ def build_similar_tickets_modal(similar_tickets_details: list):
     # --- Build the final modal view structure ---
     view = {
         "type": "modal",
+        "callback_id": "similar_tickets_modal",
+        "private_metadata": json.dumps(private_metadata_payload),
         "title": {
             "type": "plain_text",
             "text": modal_title,
@@ -184,11 +217,19 @@ def build_similar_tickets_modal(similar_tickets_details: list):
         },
         "close": {
             "type": "plain_text",
-            "text": "Close",
+            "text": "Cancel",
             "emoji": True
         },
         "blocks": modal_blocks
     }
+
+    # Conditionally add the submit button if input blocks are present
+    if source == "view_similar_tickets_action":
+        view["submit"] = {
+            "type": "plain_text",
+            "text": "Link Selected Tickets", # This will be the main action button
+            "emoji": True
+        }
 
     return view
 

@@ -21,11 +21,13 @@ logger = logging.getLogger(__name__)
 CUSTOM_FIELD_CONFIG = {
     # Populate with your actual custom field IDs and types based on your Jira setup
     # "team":          {"id": "customfield_12003", "type": "select_value_object"}, # Temporarily commented out
-    "brand":         {"id": "customfield_11997", "type": "array_of_value_objects"}, # Assuming multi-select, sending as array of value objects
-    # "environment":   {"id": "customfield_11800", "type": "select_value_object"}, # Temporarily commented out
+    "brand":         {"id": "customfield_11997", "type": "array_of_value_objects"}, # Changed to array_of_value_objects
+    "environment":   {"id": "customfield_11800", "type": "array_of_value_objects"}, # Changed to array_of_value_objects
     # "product":       {"id": "customfield_12024", "type": "select_value_object"}, # Temporarily commented out
     # "root_causes":   {"id": "customfield_11920", "type": "array_of_value_objects"}, # Temporarily commented out
     # "task_types": {"id": "customfield_BBBBB", "type": "array_of_value_objects"}, # Placeholder - ID needed
+    
+
 }
 
 
@@ -39,6 +41,7 @@ def build_jira_payload_fields(ticket_data_from_slack):
     Returns:
         dict: The 'fields' object for the Jira API.
     """
+    logger.info(f"build_jira_payload_fields received ticket_data_from_slack: {json.dumps(ticket_data_from_slack, indent=2)}")
     payload_fields = {
         "project": {
             "key": ticket_data_from_slack["project_key"]
@@ -115,11 +118,31 @@ def build_jira_payload_fields(ticket_data_from_slack):
 
     # Labels
     if ticket_data_from_slack.get("labels"):
-        labels = ticket_data_from_slack["labels"]
-        if isinstance(labels, list) and len(labels) > 0:
-            payload_fields["labels"] = labels
-        elif isinstance(labels, str) and labels.strip(): # Handle if it's a single string
-             payload_fields["labels"] = [label.strip() for label in labels.split(',')]
+        labels_input = ticket_data_from_slack["labels"]
+        processed_labels = []
+        if isinstance(labels_input, list):
+            processed_labels = [str(label).strip() for label in labels_input if label and str(label).strip()]
+        elif isinstance(labels_input, str) and labels_input.strip():
+            processed_labels = [label.strip() for label in labels_input.split(',') if label.strip()]
+        
+        if processed_labels:
+            payload_fields["labels"] = processed_labels
+            logger.info(f"Set Jira labels to: {processed_labels}")
+        else:
+            logger.info("Labels input was provided but resulted in an empty list after processing.")
+
+    # Components (standard Jira field)
+    components_value = ticket_data_from_slack.get("components") # This key comes from interaction_handlers.py
+    if components_value and isinstance(components_value, str) and components_value.strip():
+        component_names = [name.strip() for name in components_value.split(',') if name.strip()]
+        if component_names:
+            payload_fields["components"] = [{"name": name} for name in component_names]
+            logger.info(f"Set Jira components to: {payload_fields['components']}")
+        else:
+            logger.info("Components value provided but resulted in empty list after parsing.")
+    elif components_value: # Log if value is present but not a non-empty string
+        logger.warning(f"Components value found but is not a non-empty string: '{components_value}' (type: {type(components_value)})")
+
 
     # Handle Custom Fields based on CUSTOM_FIELD_CONFIG
     for slack_key, jira_config in CUSTOM_FIELD_CONFIG.items():
@@ -128,39 +151,81 @@ def build_jira_payload_fields(ticket_data_from_slack):
             jira_field_id = jira_config["id"]
             field_type = jira_config.get("type", "string") # Default to string if type not specified
 
-            if not value and (isinstance(value, list) and not all(v is not None for v in value)): # Skip empty lists or lists with None
-                 continue
+            logger.info(f"CUSTOM_FIELD_TRACE: Processing field '{slack_key}'. Input value: '{value}' (Type: {type(value)}), Configured type: '{field_type}'")
+
+            # Skip if value is an empty string for custom fields, or an empty list.
+            # None is already checked by "ticket_data_from_slack[slack_key] is not None"
+            if isinstance(value, str) and not value.strip():
+                logger.info(f"CUSTOM_FIELD_TRACE: Skipping custom field '{slack_key}' because its string value is empty.")
+                continue
+            if isinstance(value, list) and not value: # Check for empty list explicitly
+                logger.info(f"CUSTOM_FIELD_TRACE: Skipping custom field '{slack_key}' because its list value is empty.")
+                continue
 
 
-            logger.info(f"Processing custom field: Slack key='{slack_key}', Jira ID='{jira_field_id}', Type='{field_type}', Value='{value}'")
+            logger.info(f"Processing custom field: Slack key='{slack_key}', Jira ID='{jira_field_id}', Type='{field_type}', Value='{value}' (Type: {type(value)})")
 
             if field_type == "string":
                 payload_fields[jira_field_id] = str(value)
-            elif field_type == "select_value_object": # For single select expecting {"value": "OptionA"}
+                logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to string: '{str(value)}'")
+            elif field_type == "select_value_object": 
                 payload_fields[jira_field_id] = {"value": str(value)}
-            elif field_type == "select_name_object": # For single select expecting {"name": "OptionA"}
+                logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to select_value_object: {{\"value\": \"{str(value)}\"{{")
+            elif field_type == "select_name_object": 
                  payload_fields[jira_field_id] = {"name": str(value)}
-            elif field_type == "array_of_strings": # For multi-select string values
+                 logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to select_name_object: {{\"name\": \"{str(value)}\"{{")
+            elif field_type == "array_of_strings": 
+                processed_values = []
                 if isinstance(value, list):
-                    payload_fields[jira_field_id] = [str(v) for v in value if v is not None]
-                elif isinstance(value, str): # If it's a comma-separated string for multi-select
-                    payload_fields[jira_field_id] = [v.strip() for v in value.split(',') if v.strip()]
-            elif field_type == "array_of_value_objects": # For multi-select expecting [{"value": "A"}, {"value": "B"}]
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_strings) - input is list. Processing.")
+                    processed_values = [str(v).strip() for v in value if v is not None and str(v).strip()]
+                elif isinstance(value, str): 
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_strings) - input is string. Splitting by comma.")
+                    processed_values = [v.strip() for v in value.split(',') if v.strip()]
+                if processed_values:
+                    payload_fields[jira_field_id] = processed_values
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to array_of_strings: {processed_values}")
+                else:
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_strings) - resulted in empty list after processing. Field will not be added.")
+            elif field_type == "array_of_value_objects": 
+                processed_values = []
+                if isinstance(value, list): # If already a list (e.g. from a multi-select modal element)
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_value_objects) - input is list. Processing.")
+                    processed_values = [str(v).strip() for v in value if v is not None and str(v).strip()]
+                elif isinstance(value, str): # If a single string (potentially comma-separated)
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_value_objects) - input is string. Splitting by comma.")
+                    processed_values = [v.strip() for v in value.split(',') if v.strip()]
+                
+                logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_value_objects) - processed_values before object mapping: {processed_values}")
+                if processed_values: # Only add if there are items after processing
+                    payload_fields[jira_field_id] = [{"value": str(v)} for v in processed_values]
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to array_of_value_objects: {payload_fields[jira_field_id]}")
+                else:
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_value_objects) - resulted in empty list after processing. Field will not be added.")
+            elif field_type == "array_of_name_objects": 
+                processed_values = []
                 if isinstance(value, list):
-                    payload_fields[jira_field_id] = [{"value": str(v)} for v in value if v is not None]
-            elif field_type == "array_of_name_objects": # For multi-select expecting [{"name": "A"}, {"name": "B"}]
-                if isinstance(value, list):
-                    payload_fields[jira_field_id] = [{"name": str(v)} for v in value if v is not None]
-            # Add more type handlers as needed (e.g., number, date, user picker)
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_name_objects) - input is list. Processing.")
+                    processed_values = [str(v).strip() for v in value if v is not None and str(v).strip()]
+                elif isinstance(value, str):
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_name_objects) - input is string. Splitting by comma.")
+                    processed_values = [v.strip() for v in value.split(',') if v.strip()]
+
+                logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_name_objects) - processed_values before object mapping: {processed_values}")
+                if processed_values: # Only add if there are items after processing
+                    payload_fields[jira_field_id] = [{"name": str(v)} for v in processed_values]
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to array_of_name_objects: {payload_fields[jira_field_id]}")
+                else:
+                    logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' (array_of_name_objects) - resulted in empty list after processing. Field will not be added.")
             else:
                 logger.warning(f"Unknown custom field type '{field_type}' for '{slack_key}'. Storing as string.")
                 payload_fields[jira_field_id] = str(value)
+                logger.info(f"CUSTOM_FIELD_TRACE: '{slack_key}' -> Mapped to string due to unknown type: '{str(value)}'")
             
-            # Ensure we don't add the field if its processed value is empty (e.g. an empty list from array_of_strings)
             if jira_field_id in payload_fields and not payload_fields[jira_field_id]:
                 del payload_fields[jira_field_id]
-                logger.info(f"Removed empty custom field '{jira_field_id}' after processing.")
+                logger.info(f"Removed empty custom field '{jira_field_id}' after processing (e.g., array became empty).")
 
 
-    logger.debug(f"Constructed payload_fields: {payload_fields}")
+    logger.debug(f"Final constructed payload_fields for Jira: {json.dumps(payload_fields, indent=2)}")
     return payload_fields 

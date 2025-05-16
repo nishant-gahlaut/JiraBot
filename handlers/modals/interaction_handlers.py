@@ -123,34 +123,44 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
             },
             {
                 "type": "input",
+                "block_id": "components_block",
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "components_input",
+                    "placeholder": {"type": "plain_text", "text": "Enter component(s) (e.g., Backend, API)"}
+                },
+                "label": {"type": "plain_text", "text": "Components"}
+            },
+            {
+                "type": "input",
                 "block_id": "brand_block",
                 "element": {
-                    "type": "static_select",
+                    "type": "multi_static_select",
                     "action_id": "brand_select",
-                    "placeholder": {"type": "plain_text", "text": "Select brand (optional)"},
+                    "placeholder": {"type": "plain_text", "text": "Select brand(s)"},
                     "options": [
-                        {"text": {"type": "plain_text", "text": "Tata"}, "value": "tata"},
-                        {"text": {"type": "plain_text", "text": "Indigo"}, "value": "indigo"},
-                        {"text": {"type": "plain_text", "text": "Shell"}, "value": "shell"}
+                        {"text": {"type": "plain_text", "text": "TATA"}, "value": "TATA"},
+                        {"text": {"type": "plain_text", "text": "Shell malasia"}, "value": "shell_malasia"},
+                        {"text": {"type": "plain_text", "text": "Domino"}, "value": "domino"},
+                        {"text": {"type": "plain_text", "text": "Hertz"}, "value": "hertz"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Brand (Optional)"},
-                "optional": True
+                "label": {"type": "plain_text", "text": "Brand(s)"}
             },
              {
                 "type": "input",
                 "block_id": "environment_block",
                 "element": {
-                    "type": "static_select",
+                    "type": "multi_static_select",
                     "action_id": "environment_select",
-                    "placeholder": {"type": "plain_text", "text": "Select environment (optional)"},
+                    "placeholder": {"type": "plain_text", "text": "Select environment(s)"},
                     "options": [
-                        {"text": {"type": "plain_text", "text": "Demo"}, "value": "demo"},
-                        {"text": {"type": "plain_text", "text": "Prod"}, "value": "prod"}
+                        {"text": {"type": "plain_text", "text": "Prod"}, "value": "Prod"},
+                        {"text": {"type": "plain_text", "text": "Staging"}, "value": "Staging"},
+                        {"text": {"type": "plain_text", "text": "Nightly"}, "value": "Nightly"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Environment (Optional)"},
-                "optional": True
+                "label": {"type": "plain_text", "text": "Environment(s)"}
             },
              {
                 "type": "input",
@@ -250,16 +260,19 @@ def handle_modal_submission(ack, body, client, view, logger):
         labels = [opt["value"] for opt in label_options] if label_options else []
 
         team_state = values.get("team_block", {}).get("team_select", {})
-        team_option = team_state.get("selected_option") # Get selected option (might be None)
-        team = team_option.get("value") if team_option else None # Get value only if option exists
+        team_option = team_state.get("selected_option") 
+        team = team_option.get("value") if team_option else None 
+        
+        # Extract Components (newly added, assuming plain_text_input)
+        components = values.get("components_block", {}).get("components_input", {}).get("value")
         
         brand_state = values.get("brand_block", {}).get("brand_select", {})
-        brand_option = brand_state.get("selected_option")
-        brand = brand_option.get("value") if brand_option else None
+        brand_option = brand_state.get("selected_options", [])
+        brand = [opt["value"] for opt in brand_option] if brand_option else []
 
         environment_state = values.get("environment_block", {}).get("environment_select", {})
-        environment_option = environment_state.get("selected_option")
-        environment = environment_option.get("value") if environment_option else None
+        environment_option = environment_state.get("selected_options", [])
+        environment = [opt["value"] for opt in environment_option] if environment_option else []
 
         product_state = values.get("product_block", {}).get("product_select", {})
         product_option = product_state.get("selected_option")
@@ -273,13 +286,24 @@ def handle_modal_submission(ack, body, client, view, logger):
         root_cause_options = root_cause_state.get("selected_options", [])
         root_causes = [opt["value"] for opt in root_cause_options] if root_cause_options else []
 
-        # Validation for required fields (if not handled by modal itself)
-        if not title or not issue_type_id or not priority_id:
-            # This path shouldn't be hit if modal required fields are set, but good failsafe
-            logger.error(f"Modal submission missing required field(s). Title: {title}, IssueType: {issue_type_id}, Priority: {priority_id}")
-            # Cannot ack() here as ack() was already called. Post ephemeral error.
-            if channel_id and user_id:
-                client.chat_postEphemeral(channel=channel_id, user=user_id, thread_ts=thread_ts, text="Error: Missing required fields (Title, Issue Type, or Priority) in submission.")
+        # Validation for required fields
+        errors = {}
+        if not title or title.isspace():
+            errors["summary_block"] = "Summary cannot be empty."
+        if not issue_type_id:
+            errors["issue_type_block"] = "Issue Type is required."
+        if not priority_id:
+            errors["priority_block"] = "Priority is required."
+        if not components or components.isspace(): # Added validation for components
+            errors["components_block"] = "Components are required."
+        if not brand: # Added validation for brand (brand is the value from selected_option)
+            errors["brand_block"] = "Brand is required."
+        if not environment: # Added validation for environment
+            errors["environment_block"] = "Environment is required."
+
+        if errors:
+            logger.warning(f"Modal validation failed: {errors}")
+            ack({"response_action": "errors", "errors": errors})
             return
 
     except KeyError as e:
@@ -311,6 +335,13 @@ def handle_modal_submission(ack, body, client, view, logger):
         "assignee_id": assignee_jira_id,
         "reporter_id": reporter_jira_id,
         "labels": labels,
+        "components": components, # Added components to payload
+        "team": team,
+        "brand": brand,
+        "environment": environment,
+        "product": product,
+        "task_types": task_types,
+        "root_causes": root_causes
         # Map custom fields (replace customfield_XXXXX with actual IDs from your Jira)
         # Ensure the values (team, brand, env, etc.) are correctly formatted if they are structured fields in Jira
         # For multi-selects (task_types, root_causes), ensure they are passed as a list of {'value': '...'} or similar if required by Jira API
@@ -348,9 +379,10 @@ def handle_modal_submission(ack, body, client, view, logger):
             # --- Call build_rich_ticket_blocks with the dictionary ---
             success_blocks = build_rich_ticket_blocks(ticket_data=ticket_data_for_blocks)
 
-            # --- ADD BUTTON CONDITIONALLY (Using thread_summary) ---
+            # --- ADD BUTTON CONDITIONALLY (Using thread_summary and original_ticket_key) ---
             if thread_summary_for_button: # Check if summary is non-empty
-                 button_payload = {"thread_summary": thread_summary_for_button} # Store as dict
+                 button_payload = {"thread_summary": thread_summary_for_button,
+                                   "original_ticket_key": created_ticket_details["key"]} # Store as dict
                  button_value = json.dumps(button_payload)
                  if len(button_value) < 2000:
                      similar_tickets_button_block = {
@@ -424,17 +456,23 @@ def handle_create_ticket_submission(ack, body, client, logger):
         team_option = state_values["team_block"]["team_select"].get("selected_option")
         team = team_option["value"] if team_option else None
         
-        brand_option = state_values["brand_block"]["brand_select"].get("selected_option")
-        brand = brand_option["value"] if brand_option else None
+        # Extract Components (newly added, assuming plain_text_input)
+        components_input = state_values.get("components_block", {}).get("components_input", {})
+        components = components_input.get("value")
         
-        environment_option = state_values["environment_block"]["environment_select"].get("selected_option")
-        environment = environment_option["value"] if environment_option else None
+        brand_options = state_values["brand_block"]["brand_select"].get("selected_options", [])
+        brand = [opt["value"] for opt in brand_options] if brand_options else []
+        logger.info(f"Extracted Brand from modal: {brand} (Type: {type(brand)})")
+        
+        environment_options = state_values["environment_block"]["environment_select"].get("selected_options", [])
+        environment = [opt["value"] for opt in environment_options] if environment_options else []
+        logger.info(f"Extracted Environment from modal: {environment} (Type: {type(environment)})")
         
         product_option = state_values["product_block"]["product_select"].get("selected_option")
         product = product_option["value"] if product_option else None
         
         task_type_options = state_values["task_type_block"]["task_type_select"].get("selected_options", [])
-        task_types = [opt["value"] for opt in task_type_options] if task_type_options else []
+        task_types = [opt["value"] for opt in task_type_options] if task_types else []
 
         root_cause_options = state_values["root_cause_block"]["root_cause_select"].get("selected_options", [])
         root_causes = [opt["value"] for opt in root_cause_options] if root_cause_options else []
@@ -448,7 +486,8 @@ def handle_create_ticket_submission(ack, body, client, logger):
             "assignee_block": "assignee_block", "label_block": "label_block", 
             "team_block": "team_block", "brand_block": "brand_block", 
             "environment_block": "environment_block", "product_block": "product_block", 
-            "task_type_block": "task_type_block", "root_cause_block": "root_cause_block"
+            "task_type_block": "task_type_block", "root_cause_block": "root_cause_block",
+            "components_block": "components_block" # Added components_block to map
         }
         error_block = error_block_map.get(block_id_match, "summary_block")
         ack({"response_action": "errors", "errors": {error_block: f"Error processing input: {e}"}})
@@ -461,82 +500,171 @@ def handle_create_ticket_submission(ack, body, client, logger):
         errors["issue_type_block"] = "Please select an Issue Type."
     if not priority:
          errors["priority_block"] = "Please select a priority."
+    if not components or components.isspace(): # Added validation for components
+        errors["components_block"] = "Components are required."
+    if not brand:
+        errors["brand_block"] = "Brand is required."
+    if not environment:
+        errors["environment_block"] = "Environment is required."
 
     if errors:
         ack({"response_action": "errors", "errors": errors})
         logger.warning(f"Modal validation failed: {errors}")
         return
 
-    ack() 
-    logger.info("Create ticket modal submission acknowledged.")
+    # ack() # This ack() is redundant as it was called at the start of the function or in the error block.
+    logger.info("Create ticket modal submission acknowledged and validated.")
 
     try:
-        metadata = json.loads(view["private_metadata"])
-        original_channel_id = metadata["channel_id"]
-        original_thread_ts = metadata["thread_ts"]
-        submitter_user_id = metadata["user_id"]
+        metadata_str = view.get("private_metadata", "{}") # Get metadata string safely
+        metadata = json.loads(metadata_str)
+        original_channel_id = metadata.get("channel_id") # Use .get for safety
+        original_thread_ts = metadata.get("thread_ts")
+        submitter_user_id = metadata.get("user_id") # This might be the user who initiated the modal, not necessarily who submitted
+
+        # Fallback if channel_id or thread_ts is not in metadata (e.g. direct /create command)
+        # For direct commands, the initial interaction might not have a channel/thread context stored in private_metadata.
+        # The body of the view_submission itself might contain a channel_id if the modal was opened from a message context.
+        # However, for a globally submitted modal, body.channel.id might not be present.
+        # Safest is to rely on what was put into private_metadata.
+        if not original_channel_id and body.get("channel"): # Fallback, but might not exist
+            original_channel_id = body["channel"]["id"]
+        if not submitter_user_id:
+            submitter_user_id = body["user"]["id"] # User who submitted the modal
+            
     except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Error parsing private_metadata from modal submission: {e}")
+        logger.error(f"Error parsing private_metadata or missing keys in modal submission: {e}", exc_info=True)
+        # Can't reliably post to channel if channel_id is missing.
+        # If user_id is available from body, could post ephemeral error.
+        if body.get("user", {}).get("id"):
+            client.chat_postEphemeral(
+                channel=body["user"]["id"], # DM to user if channel context is lost
+                user=body["user"]["id"],
+                text="Sorry, there was an internal error processing your request (metadata issue). Please try again."
+            )
         return 
         
     project_key_from_env = os.environ.get("TICKET_CREATION_PROJECT_ID")
     if not project_key_from_env:
         logger.error("TICKET_CREATION_PROJECT_ID environment variable not set.")
-        try:
-            client.chat_postMessage(
-                channel=original_channel_id,
-                thread_ts=original_thread_ts,
-                text=f"<@{submitter_user_id}> I couldn't create the Jira ticket because the Project ID is not configured in the bot. Please contact an administrator."
-            )
-        except Exception as e_post:
-            logger.error(f"Error posting project ID missing message: {e_post}")
+        # Post error message to the original channel if possible
+        if original_channel_id and submitter_user_id:
+            try:
+                client.chat_postMessage(
+                    channel=original_channel_id,
+                    thread_ts=original_thread_ts, # Post in thread if ts is available
+                    text=f"<@{submitter_user_id}> I couldn't create the Jira ticket because the Project ID is not configured in the bot. Please contact an administrator."
+                )
+            except Exception as e_post:
+                logger.error(f"Error posting project ID missing message: {e_post}")
+        elif submitter_user_id: # Fallback to DM if channel context is fully lost
+            client.chat_postEphemeral(channel=submitter_user_id, user=submitter_user_id, text="Project ID not configured for Jira integration.")
         return
 
     ticket_data_for_jira = {
         "summary": summary, "description": description,
         "project_key": project_key_from_env, "issue_type": issue_type, 
-        "priority": priority, "assignee_id": assignee_id,
-        "labels": labels, "team": team, "brand": brand,
-        "environment": environment, "product": product,
-        "task_types": task_types, "root_causes": root_causes
+        "priority_name": priority, # Changed from priority to priority_name to match payload expectations
+        "assignee_id": assignee_id,
+        "labels": labels, 
+        # "team": team, # Custom field mapping will be handled by build_jira_payload_fields
+        # "brand": brand,
+        # "environment": environment,
+        "components_by_name": [comp.strip() for comp in components.split(',')] if components else None, # Pass as list of names
+        "product": product,
+        "task_types": task_types, 
+        "root_causes": root_causes,
+        # Pass raw selected values for custom fields that build_jira_payload_fields will map
+        "selected_team_value": team, 
+        "brand": brand,
+        "environment": environment
     }
-    logger.info(f"Attempting to create Jira ticket with data: {ticket_data_for_jira}")
+    # Remove None or empty list values before sending to build_jira_payload_fields, or let it handle them
+    logger.info(f"Final ticket_data_for_jira before calling create_jira_ticket: {json.dumps(ticket_data_for_jira, indent=2)}")
 
     jira_response = create_jira_ticket(ticket_data_for_jira)
 
+    confirmation_blocks = []
+    fallback_text = ""
+
     if jira_response and jira_response.get("key") and jira_response.get("url"):
-        confirmation_text = (
-            f"<@{submitter_user_id}>, your Jira ticket has been successfully created!\\n\\n"
-            f"*Ticket*: <{jira_response['url']}|{jira_response['key']}>\\n"
-            f"*Project*: {project_key_from_env}\\n"
-            f"*Issue Type*: {issue_type or 'Not Set'}\\n"
-            f"*Summary*: {summary}\\n"
-            f"*Priority*: {priority or 'Not Set'}\\n"
-            f"*Assignee*: {f'<@{assignee_id}>' if assignee_id else 'Unassigned (or mapping pending)'}\\n"
-            + (f"*Labels*: {', '.join(labels)}\\n" if labels else "")
-            + (f"*Team*: {team}\\n" if team else "")
-            + (f"*Brand*: {brand}\\n" if brand else "")
-            + (f"*Environment*: {environment}\\n" if environment else "")
-            + (f"*Product*: {product}\\n" if product else "")
-            + (f"*Task Types*: {', '.join(task_types)}\\n" if task_types else "")
-            + (f"*Root Cause(s)*: {', '.join(root_causes)}\\n" if root_causes else "")
-        )
         logger.info(f"Successfully created Jira ticket {jira_response['key']}. Confirmation posted to Slack.")
+        # Use build_rich_ticket_blocks for the main ticket display
+        # Ensure the data passed to build_rich_ticket_blocks matches its expectations
+        rich_ticket_data = {
+            'ticket_key': jira_response["key"],
+            'url': jira_response["url"],
+            'summary': jira_response.get("title", summary), # Use title from response, fallback to submitted summary
+            'status': jira_response.get("status_name", "N/A"),
+            'priority': jira_response.get("priority_name", priority),
+            'assignee': jira_response.get("assignee_name", f"<@{assignee_id}>" if assignee_id else "Unassigned"),
+            'issue_type': jira_response.get("issue_type_name", issue_type)
+            # Add other fields like 'owned_by_team' if available and needed by build_rich_ticket_blocks
+        }
+        confirmation_blocks.extend(build_rich_ticket_blocks(rich_ticket_data))
+        fallback_text = f"Ticket {jira_response['key']} created: {jira_response['url']}"
+
+        # --- Add 'View Similar Tickets' Button --- 
+        # Using original_ticket_key (which is jira_response["key"]) and thread_summary (if available from metadata)
+        original_ticket_key_for_button = jira_response["key"]
+        thread_summary_for_similar_button = metadata.get("thread_summary", "") # From original modal context
+        
+        button_payload_for_similar = {
+            "original_ticket_key": original_ticket_key_for_button,
+            "thread_summary": thread_summary_for_similar_button,
+            "channel_id": original_channel_id, # Carry context for the next modal
+            "thread_ts": original_thread_ts   # Carry context for the next modal
+        }
+        button_value_str = json.dumps(button_payload_for_similar)
+
+        if len(button_value_str) < 2000: # Slack's limit for button value
+            confirmation_blocks.append({
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🔍 View Similar Tickets", "emoji": True},
+                        "action_id": "view_similar_tickets_modal_button",
+                        "value": button_value_str,
+                        "style": "primary"
+                    }
+                ]
+            })
+        else:
+            logger.warning(f"Button payload for 'View Similar' too long ({len(button_value_str)}), not adding button.")
+
     else:
-        confirmation_text = (
-            f"<@{submitter_user_id}>, there was an error creating your Jira ticket. \\n"
+        fallback_text = (
+            f"<@{submitter_user_id}>, there was an error creating your Jira ticket. \n"
             f"Our team has been notified. Please try again later or contact support if the issue persists."
         )
+        confirmation_blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": fallback_text}
+        })
         logger.error(f"Failed to create Jira ticket. Jira service response: {jira_response}")
 
-    try:
-        client.chat_postMessage(
-            channel=original_channel_id,
-            thread_ts=original_thread_ts,
-            text=confirmation_text
-        )
-        logger.info(f"Posted modal submission confirmation to thread {original_thread_ts}")
-    except SlackApiError as e:
-        logger.error(f"Slack API Error posting modal confirmation: {e.response['error']}")
-    except Exception as e:
-        logger.error(f"Error posting modal submission confirmation: {e}") 
+    # Post the message
+    if original_channel_id: # Only post if we have a channel context
+        try:
+            client.chat_postMessage(
+                channel=original_channel_id,
+                thread_ts=original_thread_ts, # Will post as a new message if original_thread_ts is None
+                text=fallback_text, # Fallback for notifications
+                blocks=confirmation_blocks
+            )
+            logger.info(f"Posted modal submission confirmation to channel {original_channel_id}, thread {original_thread_ts or 'N/A'}.")
+        except SlackApiError as e:
+            logger.error(f"Slack API Error posting modal confirmation: {e.response['error']}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Error posting modal submission confirmation: {e}", exc_info=True)
+    elif submitter_user_id: # Fallback to DM if no channel context
+        try:
+            client.chat_postMessage(
+                channel=submitter_user_id, # DM to the user who submitted
+                text=fallback_text,
+                blocks=confirmation_blocks
+            )
+            logger.info(f"Posted modal submission confirmation via DM to user {submitter_user_id}.")
+        except Exception as e_dm:
+            logger.error(f"Error posting modal submission confirmation via DM: {e_dm}", exc_info=True) 
