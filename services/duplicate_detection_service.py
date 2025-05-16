@@ -5,6 +5,7 @@ from typing import List, Optional, Dict
 from pinecone import Index as PineconeIndex
 from langchain_community.vectorstores import FAISS
 from langchain.schema import Document
+import time
 
 from .embedding_service import get_cohere_embeddings
 from .genai_service import get_llm
@@ -141,73 +142,38 @@ def rerank_tickets_with_llm(query: str, docs: List[Document], top_n: int = 3) ->
         return docs[:top_n]
 
 
-def summarize_ticket_similarities(query: str, tickets: List[Document]) -> str:
-    if not tickets:
-        logger.info("No tickets provided to summarize_ticket_similarities. Returning empty summary.")
-        return "No specific tickets were found to summarize based on the reranking."
-    if not llm:
-        logger.warning("LLM not initialized. Cannot summarize ticket similarities.")
-        return "Summary unavailable: LLM not initialized."
-
-    logger.info(f"Summarizing {len(tickets)} tickets for query: '{query[:100]}...'")
-    ticket_texts = "\n\n".join([f"Ticket ID: {doc.metadata.get('ticket_id', f'Item {i+1}')}\nContent:\n{doc.page_content}" for i, doc in enumerate(tickets)])
-    prompt_to_llm = SUMMARIZE_TICKET_SIMILARITIES_PROMPT.format(query=query, ticket_texts=ticket_texts)
-    logger.debug(f"Prompt for summarization:\n---\n{prompt_to_llm}\n---")
-
-    try:
-        summary = llm.invoke(prompt_to_llm).content.strip()
-        logger.info(f"Generated summary: '{summary[:100]}...'")
-        return summary
-    except Exception as e:
-        logger.error(f"LLM summarization error: {e}", exc_info=True)
-        return "Failed to generate summary due to an error."
-
-
-def find_and_summarize_duplicatessss(user_query: str, retrieve_k: int = 10, rerank_n: int = 3) -> dict:
+def find_and_summarize_duplicates_mention_flow(user_query: str, retrieve_k: int = 10, rerank_n: int = 3) -> dict:
     logger.info(f"Starting duplicate detection pipeline with find_and_summarize_duplicates for query: '{user_query[:100]}...'")
 
     initial_tickets = retrieve_top_k_tickets(user_query, k=retrieve_k)
     if not initial_tickets:
         logger.warning("No initial tickets found by retrieve_top_k_tickets. Cannot proceed.")
-        return {"top_tickets": [], "summary": "No similar tickets found during initial retrieval.", "error": "No initial tickets found."}
+        return {"tickets": [], "error": "No initial tickets found."}
 
     reranked_tickets = rerank_tickets_with_llm(user_query, initial_tickets, top_n=rerank_n)
     if not reranked_tickets:
         logger.warning("No tickets selected after LLM reranking by rerank_tickets_with_llm.")
-        # Optionally, could summarize top N of initial_tickets as a fallback here
-        # summary = summarize_ticket_similarities(user_query, initial_tickets[:rerank_n]) 
-        # For now, we reflect that reranking produced no results for summarization if it's empty.
-        summary = "No specific tickets were identified as most relevant after reranking."
-    else:
-        logger.info(f"Details of {len(reranked_tickets)} tickets after reranking (to be summarized):")
-        for i, doc in enumerate(reranked_tickets):
-            logger.info(f"  Reranked Doc {i+1} (ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {doc.metadata.get('score', 'N/A')}, Length: {len(doc.page_content)} chars):")
-            # Avoid logging full metadata dictionary if it's huge
-            loggable_metadata = {k: v for k, v in doc.metadata.items() if k not in ['retrieved_problem_statement', 'retrieved_solution_summary']} # Log key fields
-            logger.info(f"    {json.dumps(loggable_metadata, indent=4)}") 
-            logger.info(f"    Content Snippet: {doc.page_content[:80]}...")
+        return {"tickets": [], "error": "No tickets selected after reranking."}
 
-    # --- Summarize the Findings (COMMENTED OUT as per request) ---
-    summary = None # Set summary to None as we are skipping the summarization step
-    # try:
-    #     logger.info(f"Summarizing {len(reranked_tickets)} tickets for query: '{user_query[:80]}...'")
-    #     summary = summarize_ticket_similarities(user_query, reranked_tickets)
-    #     logger.info(f"Generated summary: '{summary[:100]}...'")
-    # except Exception as e_summary:
-    #     logger.error(f"Error during similarity summary generation: {e_summary}", exc_info=True)
-    #     summary = f"Error: Could not generate summary for similar tickets ({e_summary})"
+    logger.info(f"Details of {len(reranked_tickets)} tickets after reranking:")
+    for i, doc in enumerate(reranked_tickets):
+        logger.info(f"  Reranked Doc {i+1} (ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {doc.metadata.get('score', 'N/A')}, Length: {len(doc.page_content)} chars):")
+        # Avoid logging full metadata dictionary if it's huge
+        loggable_metadata = {k: v for k, v in doc.metadata.items() if k not in ['retrieved_problem_statement', 'retrieved_solution_summary']} # Log key fields
+        logger.info(f"    {json.dumps(loggable_metadata, indent=4)}") 
+        logger.info(f"    Content Snippet: {doc.page_content[:80]}...")
 
     # Prepare final payload for app.py
     final_payload_tickets = []
-    for doc in reranked_tickets: # Use the reranked_tickets for the payload
+    for doc in reranked_tickets:
         final_payload_tickets.append({
             "ticket_id": doc.metadata.get("ticket_id", "N/A"),
-            "page_content": doc.page_content, # Langchain Document schema uses page_content
+            "page_content": doc.page_content,
             "metadata": doc.metadata
         })
 
     logger.info(f"Duplicate detection pipeline finished. Returning {len(final_payload_tickets)} tickets.")
-    return {"tickets": final_payload_tickets, "summary": summary, "error": None}
+    return {"tickets": final_payload_tickets, "error": None}
 
 
 def retrieve_top_k(query: str, k: int = 10) -> List[Document]:
@@ -260,43 +226,75 @@ def find_similar_jira_tickets(query: str) -> Dict:
         "summary": summary
     }
 
+def summarize_ticket_similarities(query: str, docs: List[Document]) -> str:
+    if not docs:
+        logger.warning("No documents provided to summarize_ticket_similarities. Returning empty summary.")
+        return "No similar tickets found to summarize."
+    if not llm:
+        logger.warning("LLM not available for summarization. Returning empty summary.")
+        return "Error: LLM service not available for summarization."
+
+    logger.info(f"Summarizing {len(docs)} tickets for query: '{query[:100]}...'")
+    formatted_docs_for_prompt = "\n".join([
+        f"[{i+1}] ID: {doc.metadata.get('ticket_id', 'N/A')} Score: {doc.metadata.get('score', 'N/A'):.4f}\nContent: {doc.page_content[:500]}..." 
+        for i, doc in enumerate(docs)
+    ])
+    prompt_to_llm = SUMMARIZE_TICKET_SIMILARITIES_PROMPT.format(query=query, formatted_docs=formatted_docs_for_prompt)
+    
+    logger.debug(f"Prompt sent to LLM for summarization:\n---\n{prompt_to_llm}\n---")
+
+    try:
+        llm_result = llm.invoke(prompt_to_llm)
+        summary = getattr(llm_result, 'content', str(llm_result)).strip()
+        logger.info(f"Generated summary: '{summary[:100]}...'")
+        return summary
+    except Exception as e:
+        logger.error(f"Error during LLM summarization: {e}", exc_info=True)
+        return f"Error: Could not generate summary for similar tickets ({e})"
+
 def find_and_summarize_duplicates(user_query: str, retrieve_k: int = 10, rerank_n: int = 3) -> dict:
     logger.info(f"Starting duplicate detection pipeline with find_and_summarize_duplicates for query: '{user_query[:100]}...'")
 
+    # 1. Retrieve top k tickets
+    start_time_retrieve = time.time()
     initial_tickets = retrieve_top_k_tickets(user_query, k=retrieve_k)
+    end_time_retrieve = time.time()
+    logger.info(f"Retrieving top {retrieve_k} tickets took {end_time_retrieve - start_time_retrieve:.2f} seconds")
+    
     if not initial_tickets:
         logger.warning("No initial tickets found by retrieve_top_k_tickets. Cannot proceed.")
-        return {"top_tickets": [], "summary": "No similar tickets found during initial retrieval.", "error": "No initial tickets found."}
+        return {"tickets": [], "error": "No initial tickets found."}
 
+    # 2. Rerank tickets
+    start_time_rerank = time.time()
     reranked_tickets = rerank_tickets_with_llm(user_query, initial_tickets, top_n=rerank_n)
+    end_time_rerank = time.time()
+    logger.info(f"Reranking {len(initial_tickets)} tickets took {end_time_rerank - start_time_rerank:.2f} seconds")
+
     if not reranked_tickets:
         logger.warning("No tickets selected after LLM reranking by rerank_tickets_with_llm.")
-        # Optionally, could summarize top N of initial_tickets as a fallback here
-        # summary = summarize_ticket_similarities(user_query, initial_tickets[:rerank_n]) 
-        # For now, we reflect that reranking produced no results for summarization if it's empty.
-        summary = "No specific tickets were identified as most relevant after reranking."
-    else:
-        logger.info(f"Details of {len(reranked_tickets)} tickets after reranking (to be summarized):")
-        for i, doc in enumerate(reranked_tickets):
-            logger.info(f"  Reranked Doc {i+1} (ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {doc.metadata.get('score', 'N/A')}, Length: {len(doc.page_content)} chars):")
-            try:
-                metadata_json = json.dumps(doc.metadata, indent=2, default=str)
-                for line in metadata_json.splitlines():
-                    logger.info(f"    {line}")
-                content_snippet_reranked = doc.page_content[:200].replace('\n', ' ')
-                logger.info(f"    Content Snippet: {content_snippet_reranked}...")
-            except Exception as log_e:
-                logger.warning(f"    Error logging details for reranked doc {doc.metadata.get('ticket_id', 'N/A')}: {log_e}")
-        summary = summarize_ticket_similarities(user_query, reranked_tickets)
+        return {"tickets": [], "error": "No tickets selected after reranking."}
+
+    logger.info(f"Details of {len(reranked_tickets)} tickets after reranking:")
+    for i, doc in enumerate(reranked_tickets):
+        logger.info(f"  Reranked Doc {i+1} (ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {doc.metadata.get('score', 'N/A')}, Length: {len(doc.page_content)} chars):")
+        try:
+            metadata_json = json.dumps(doc.metadata, indent=2, default=str)
+            for line in metadata_json.splitlines():
+                logger.info(f"    {line}")
+            content_snippet_reranked = doc.page_content[:200].replace('\n', ' ')
+            logger.info(f"    Content Snippet: {content_snippet_reranked}...")
+        except Exception as log_e:
+            logger.warning(f"    Error logging details for reranked doc {doc.metadata.get('ticket_id', 'N/A')}: {log_e}")
 
     # Prepare final payload for app.py
     final_payload_tickets = []
-    for doc in reranked_tickets: # Use the reranked_tickets for the payload
+    for doc in reranked_tickets:
         final_payload_tickets.append({
             "ticket_id": doc.metadata.get("ticket_id", "N/A"),
-            "page_content": doc.page_content, # Langchain Document schema uses page_content
+            "page_content": doc.page_content,
             "metadata": doc.metadata
         })
 
     logger.info(f"Duplicate detection pipeline finished. Returning {len(final_payload_tickets)} tickets.")
-    return {"tickets": final_payload_tickets, "summary": summary, "error": None}
+    return {"tickets": final_payload_tickets, "error": None}

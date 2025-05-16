@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 PINECONE_UPSERT_BATCH_SIZE = int(os.environ.get("PINECONE_UPSERT_BATCH_SIZE", 100))
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", 96)) # Default for Cohere free tier
 # Define batch size for LLM calls
-LLM_BATCH_SIZE = int(os.environ.get("LLM_BATCH_SIZE", 50)) 
+LLM_BATCH_SIZE = int(os.environ.get("LLM_BATCH_SIZE", 50))  # New constant for processing the main CSV in chunks
 
 def load_tickets_from_csv(csv_filepath: str = CSV_FILENAME) -> List[Dict[str, Any]]:
     """Loads ticket data from the specified CSV file."""
@@ -45,6 +45,12 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
     Creates ONE Document per ticket, with page_content as the problem_statement.
     Metadata includes ticketId, title, original fields, and both LLM-generated
     problem_statement and solution_summary.
+
+    Returns:
+        A tuple containing:
+            - List[Document]: The prepared LangChain documents.
+            - pd.DataFrame: The input DataFrame augmented with 'llm_problem_statement' 
+                            and 'llm_solution_summary' columns.
     """
     langchain_documents = [] 
     all_problem_statements = {} 
@@ -53,6 +59,10 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
     total_solution_llm_errors = 0
     num_tickets = len(ticket_data_df)
     logger.info(f"Preparing documents for {num_tickets} tickets, using LLM batch size {LLM_BATCH_SIZE}.")
+
+    # Initialize new columns in the DataFrame for LLM outputs
+    ticket_data_df['llm_problem_statement'] = pd.Series(dtype='str')
+    ticket_data_df['llm_solution_summary'] = pd.Series(dtype='str')
 
     # Process DataFrame in chunks/batches for LLM calls
     for i in range(0, num_tickets, LLM_BATCH_SIZE):
@@ -120,6 +130,8 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
                 batch_problem_errors_this_batch += 1
                 problem_statement_text = "Error: Problem statement result missing in batch"
             all_problem_statements[original_ticket_index] = problem_statement_text
+            # Add to DataFrame
+            ticket_data_df.loc[original_ticket_index, 'llm_problem_statement'] = problem_statement_text
 
             # Store solution summary
             solution_summary_text = "Error: Solution generation failed or skipped"
@@ -137,6 +149,8 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
                 batch_solution_errors_this_batch += 1
                 solution_summary_text = "Error: Solution result missing in batch"
             all_solution_summaries[original_ticket_index] = solution_summary_text
+            # Add to DataFrame
+            ticket_data_df.loc[original_ticket_index, 'llm_solution_summary'] = solution_summary_text
 
         if batch_problem_errors_this_batch > 0:
             total_problem_llm_errors += batch_problem_errors_this_batch # Accumulate total errors
@@ -152,7 +166,8 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
     metadata_fields = [
         'ticket_id', 'summary', 'status', 'priority', 'reporter', 'assignee', 
         'created_at', 'updated_at', 'labels', 'components', 'owned_by_team', 
-        'brand', 'product', 'geo_region', 'environment', 'root_cause', 'sprint'
+        'brand', 'product', 'geo_region', 'environment', 'root_cause', 'sprint',
+        'url'  # ADDED URL to metadata fields
     ]
 
     for index, ticket_row in ticket_data_df.iterrows():
@@ -178,6 +193,8 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
         metadata["retrieved_solution_summary"] = llm_solution_summary # Store LLM solution summary in metadata
         # No content_type field needed anymore
         
+        logger.debug(f"Ticket {original_ticket_id} metadata includes URL: {metadata.get('url')}")
+
         # Clean metadata values for Pinecone
         for key, value in metadata.items():
             if isinstance(value, list):
@@ -198,103 +215,133 @@ def prepare_documents_for_embedding(ticket_data_df: pd.DataFrame) -> List[Docume
     if total_solution_llm_errors > 0:
         logger.warning(f"Total Solution summary LLM failures/invalid responses during generation: {total_solution_llm_errors}.")
 
-    # --- ADDED: Save LLM outputs and key metadata to CSV --- 
-    logger.info("Preparing data for LLM outputs CSV export...")
-    data_for_llm_summary_csv = []
-    for doc in langchain_documents:
-        # Ensure metadata exists and get values safely
-        metadata = doc.metadata if doc.metadata else {}
-        data_for_llm_summary_csv.append({
-            'ticket_id': metadata.get('ticketId', 'N/A'), # Use the consistent ticketId key
-            'original_summary': metadata.get('title', ''), # Original summary stored as title
-            'llm_problem_statement': metadata.get('retrieved_problem_statement', 'Error: Not found in metadata'),
-            'llm_solution_summary': metadata.get('retrieved_solution_summary', 'Error: Not found in metadata')
-            # Add other metadata fields here if needed for the CSV
-        })
+    # The DataFrame ticket_data_df is now augmented with llm_problem_statement and llm_solution_summary
 
-    if data_for_llm_summary_csv:
-        llm_summary_df = pd.DataFrame(data_for_llm_summary_csv)
-        output_csv_filename = "llm_outputs_summary.csv"
-        try:
-            # Use quoting to handle potential commas/newlines in summaries
-            llm_summary_df.to_csv(output_csv_filename, index=False, encoding='utf-8', quoting=csv.QUOTE_ALL)
-            logger.info(f"Successfully saved LLM output summary for {len(llm_summary_df)} documents to '{output_csv_filename}'.")
-        except Exception as e:
-            logger.error(f"Failed to save LLM output summary data to CSV '{output_csv_filename}': {e}", exc_info=True)
-    else:
-        logger.warning("No data extracted from documents to save to LLM summary CSV.")
-    # --- END ADDED CSV EXPORT --- 
+    return langchain_documents, ticket_data_df
 
-    return langchain_documents
+def post_llm_processing(df_augmented: pd.DataFrame, docs_to_embed: List[Document]) -> (pd.DataFrame, List[Document]):
+    """
+    Filters the augmented DataFrame and the list of Document objects based on LLM output quality.
+
+    Rows are removed if:
+    - 'llm_solution_summary' contains "No clear solution" (case-insensitive).
+    - 'llm_problem_statement' contains "failed to generate/parse" (case-insensitive) 
+      or starts with "Error:" (case-insensitive).
+
+    Args:
+        df_augmented (pd.DataFrame): DataFrame with 'llm_problem_statement' and 'llm_solution_summary'.
+        docs_to_embed (List[Document]): List of LangChain Document objects.
+
+    Returns:
+        A tuple containing:
+            - pd.DataFrame: The filtered DataFrame.
+            - List[Document]: The filtered list of Document objects.
+    """
+    if df_augmented.empty:
+        logger.warning("post_llm_processing received an empty DataFrame. Returning as is.")
+        return df_augmented, docs_to_embed
+
+    initial_df_rows = len(df_augmented)
+    initial_docs_count = len(docs_to_embed)
+    logger.info(f"Starting post-LLM processing. Initial DataFrame rows: {initial_df_rows}, Initial documents: {initial_docs_count}")
+
+    # Ensure columns exist to prevent KeyErrors on empty or malformed DataFrames
+    if 'llm_solution_summary' not in df_augmented.columns:
+        logger.error("'llm_solution_summary' column missing in DataFrame for post_llm_processing.")
+        return df_augmented, docs_to_embed # Or handle more gracefully
+    if 'llm_problem_statement' not in df_augmented.columns:
+        logger.error("'llm_problem_statement' column missing in DataFrame for post_llm_processing.")
+        return df_augmented, docs_to_embed
+
+    # Conditions for removal
+    # Convert to string type and fill NA to avoid errors with .str accessor on non-string types
+    condition_no_clear_solution = df_augmented['llm_solution_summary'].astype(str).str.contains(
+        "No clear solution", 
+        case=False, 
+        na=False
+    )
+    condition_failed_problem_parse = df_augmented['llm_problem_statement'].astype(str).str.contains(
+        "failed to generate/parse", 
+        case=False, 
+        na=False
+    )
+    condition_error_problem = df_augmented['llm_problem_statement'].astype(str).str.startswith(
+        "Error:",
+        na=False # Treats NaN as not starting with "Error:"
+    )
+
+    # More comprehensive conditions for llm_solution_summary errors
+    condition_solution_contains_failed_parse = df_augmented['llm_solution_summary'].astype(str).str.contains(
+        "Failed to generate/parse solution", # General check, covers with/without "after 10"
+        case=False, 
+        na=False
+    )
+    condition_solution_starts_with_error = df_augmented['llm_solution_summary'].astype(str).str.startswith(
+        "Error:",
+        na=False # Treats NaN as not starting with "Error:"
+    )
+    
+    # Combine removal conditions (rows to remove = True)
+    rows_to_remove_mask = (
+        condition_no_clear_solution |          # For solution summary
+        condition_failed_problem_parse |       # For problem statement
+        condition_error_problem |              # For problem statement
+        condition_solution_contains_failed_parse | # For solution summary (replaces old specific one)
+        condition_solution_starts_with_error     # For solution summary
+    )
+
+    # DataFrame to keep (rows_to_remove_mask is False)
+    df_processed = df_augmented[~rows_to_remove_mask].copy()
+    num_rows_removed_df = initial_df_rows - len(df_processed)
+    logger.info(f"DataFrame filtering: Removed {num_rows_removed_df} rows.")
+
+    # Get ticket_ids of the rows that were kept in the DataFrame
+    kept_ticket_ids = set(df_processed['ticket_id'].unique())
+    logger.info(f"{len(kept_ticket_ids)} unique ticket_ids kept after DataFrame filtering.")
+
+    # Filter documents_to_embed
+    docs_processed = [doc for doc in docs_to_embed if doc.metadata.get('ticketId') in kept_ticket_ids]
+    num_docs_removed = initial_docs_count - len(docs_processed)
+    logger.info(f"Documents filtering: Removed {num_docs_removed} documents.")
+
+    if len(df_processed) != len(docs_processed):
+        logger.warning(
+            f"Mismatch after filtering: Processed DataFrame rows: {len(df_processed)}, "
+            f"Processed Documents: {len(docs_processed)}. "
+            f"This may indicate issues with ticket_id mapping or prior document creation logic."
+        )
+
+    logger.info(f"Finished post-LLM processing. Final DataFrame rows: {len(df_processed)}, Final documents: {len(docs_processed)}.")
+    return df_processed, docs_processed
 
 def run_ingestion_pipeline():
+    # INITIAL PARAMETER LOGGING
+    MAIN_CSV_CHUNK_SIZE = 200
+    max_rows_to_process_this_run=2000
+    start_row_index_in_csv=2001
+    logger.info(f"RUN_INGESTION_PIPELINE CALLED WITH: start_row_index_in_csv={start_row_index_in_csv} (type: {type(start_row_index_in_csv)}), max_rows_to_process_this_run={max_rows_to_process_this_run} (type: {type(max_rows_to_process_this_run)})")
     """
-    Main function to orchestrate the ingestion pipeline:
-    1. Load tickets from CSV.
-    2. Prepare Document objects.
-    3. Initialize Cohere embeddings and Pinecone index.
-    4. Get embeddings for documents in batches.
-    5. Upsert documents and embeddings to Pinecone in batches.
+    Main function to orchestrate the ingestion pipeline.
+    Processes a segment of the Jira tickets CSV file.
+
+    Args:
+        start_row_index_in_csv (int): 0-based index of the data row in the CSV 
+                                      from which to start processing (default: 0).
+        max_rows_to_process_this_run (int): Maximum number of rows to process in this run.
+                                            -1 means process all rows from start_row_index_in_csv 
+                                            to the end of the file (default: -1).
     """
-    logger.info("Starting Jira to Pinecone ingestion pipeline...")
+    logger.info(
+        f"Starting Jira to Pinecone ingestion pipeline. \
+        Starting from CSV row index: {start_row_index_in_csv}, \
+        Max rows to process this run: {'ALL' if max_rows_to_process_this_run == -1 else max_rows_to_process_this_run}"
+    )
+    
+    total_rows_iterated_from_csv = 0 # Tracks all rows seen by the CSV iterator
+    rows_processed_in_this_run = 0
+      # Tracks rows processed in this specific pipeline invocation
 
-    # 1. Load tickets from CSV
-    # Assumes CSV_FILENAME is defined in jira_scraper and imported, or define path directly
-    # For now, using the imported CSV_FILENAME from utils.jira_scraper
-    jira_tickets = load_tickets_from_csv(csv_filepath=CSV_FILENAME)
-    if not jira_tickets:
-        logger.error("No tickets loaded from CSV. Aborting pipeline.")
-        return
-        
-    # Convert list of dicts to DataFrame
-    jira_tickets_df = pd.DataFrame(jira_tickets)
-    logger.info(f"Converted loaded tickets to DataFrame. Shape: {jira_tickets_df.shape}")
-
-    # *** ADDED DATA CLEANING STEP ***
-    logger.info("Starting data cleaning process...")
-    try:
-        # Apply the cleaning pipeline defined in the utils module
-        jira_tickets_df = clean_all_columns(jira_tickets_df)
-        logger.info(f"Data cleaning finished. DataFrame shape remains: {jira_tickets_df.shape}")
-        # Optionally: Log info about cleaned columns, e.g., how many comments remain non-empty
-        non_empty_comments = len(jira_tickets_df[jira_tickets_df['cleaned_comments'].str.len() > 0])
-        logger.info(f"Number of tickets with non-empty cleaned_comments after filtering/cleaning: {non_empty_comments}")
-    except Exception as e:
-        logger.error(f"Error during data cleaning: {e}", exc_info=True)
-        logger.error("Aborting pipeline due to data cleaning error.")
-        return
-    # *** END OF ADDED DATA CLEANING STEP ***
-
-    # 2. Prepare Document objects (using the cleaned DataFrame)
-    documents_to_embed = prepare_documents_for_embedding(jira_tickets_df) # Pass the DataFrame
-    # if not documents_to_embed:
-    #     logger.error("No documents prepared for embedding after cleaning. Aborting pipeline.")
-    #     return
-    logger.info(f"--- Debugging: Printing details for {len(documents_to_embed)} prepared documents ---")
-    # for i, doc in enumerate(documents_to_embed):
-    #     # Extract metadata safely using .get()
-    #     metadata = doc.metadata if doc.metadata else {}
-    #     ticket_id = metadata.get('ticket_id', 'N/A')
-    #     summary = metadata.get('summary', 'N/A')
-    #     description = metadata.get('description', 'N/A')
-    #     comments = metadata.get('comments', 'N/A')
-    #     solution = metadata.get('solution_summary', 'N/A') # GET SOLUTION SUMMARY
-
-        # # The page_content is the LLM-generated problem statement or the fallback content
-        # problem_statement = doc.page_content
-
-        # logger.info(f"Document {i+1} (Ticket ID: {ticket_id}):")
-        # # Print snippets to keep logs manageable
-        # logger.info(f"  Metadata Summary: {str(summary)[:150]}...")
-        # logger.info(f"  Metadata Description: {str(description)[:150]}...")
-        # logger.info(f"  Metadata Comments: {str(comments)[:150]}...")
-        # logger.info(f"  Metadata Solution Summary: {str(solution)[:200]}...") # LOG SOLUTION
-        # logger.info(f"  LLM Problem Statement (page_content): {str(problem_statement)[:200]}...")
-        # logger.info("-" * 20) # Separator for readability
-
-    logger.info("--- Finished printing document details ---")
-    # 3. Initialize Cohere embeddings model (needed for Pinecone init if it relies on dimension)
-    # and Pinecone index
+    # 1. Initialize Cohere embeddings model and Pinecone index (once at the start)
     logger.info("Initializing Cohere embeddings model...")
     cohere_embeddings = get_cohere_embeddings() # From embedding_service
     if not cohere_embeddings:
@@ -302,39 +349,224 @@ def run_ingestion_pipeline():
         return
 
     logger.info("Initializing Pinecone vector store...")
-    # Pass the initialized embeddings object, though our current initialize_pinecone_vector_store doesn't use it directly
-    # It's good practice if it were to e.g. get embedding dimension
-    # UPDATED to use the new ingestion-specific function
     pinecone_index = initialize_pinecone_vector_store_ingestion(embeddings=cohere_embeddings)
     if not pinecone_index:
         logger.error("Failed to initialize Pinecone index. Aborting pipeline.")
         return
 
-    # 4. Get embeddings for documents in batches
-    logger.info(f"Generating embeddings for {len(documents_to_embed)} documents in batches of {EMBEDDING_BATCH_SIZE}...")
-    texts_to_embed = [doc.page_content for doc in documents_to_embed]
-    
-    # The get_embeddings_in_batches function is already in services.embedding_service
-    # It uses the CohereEmbeddings object internally by calling get_cohere_embeddings()
-    # So, we don't need to pass cohere_embeddings object directly to it.
-    embeddings = get_embeddings_in_batches(texts=texts_to_embed, batch_size=EMBEDDING_BATCH_SIZE)
+    try:
+        # 2. Read Jira tickets CSV in chunks
+        for raw_chunk_df in pd.read_csv(CSV_FILENAME, chunksize=MAIN_CSV_CHUNK_SIZE, encoding='utf-8'):
+            current_chunk_size = len(raw_chunk_df)
+            # Determine the slice of this raw_chunk_df that we need to process for the current run
+            
+            # If this entire chunk is before our desired start_row_index_in_csv
+            if total_rows_iterated_from_csv + current_chunk_size <= start_row_index_in_csv:
+                total_rows_iterated_from_csv += current_chunk_size
+                continue
 
-    if not embeddings or len(embeddings) != len(documents_to_embed):
-        logger.error(f"Failed to generate embeddings or mismatch in count. Expected: {len(documents_to_embed)}, Got: {len(embeddings) if embeddings else 0}. Aborting.")
+            # Determine the starting point within this current raw_chunk_df
+            offset_in_chunk_for_start_row = 0
+            if total_rows_iterated_from_csv < start_row_index_in_csv:
+                offset_in_chunk_for_start_row = start_row_index_in_csv - total_rows_iterated_from_csv
+            
+            # Determine how many rows we can take from this chunk for the current run
+            rows_to_take_from_this_chunk = current_chunk_size - offset_in_chunk_for_start_row
+            
+            # DEBUG LOGGING FOR CHECK 1 (Early Exit Logic)
+            logger.info(f"DEBUG CHK1 PRE-LIMIT: rows_to_take_from_this_chunk_initial={rows_to_take_from_this_chunk}")
+            logger.info(f"DEBUG CHK1 PRE-LIMIT: max_rows_this_run={max_rows_to_process_this_run} (type {type(max_rows_to_process_this_run)}), rows_processed_so_far={rows_processed_in_this_run} (type {type(rows_processed_in_this_run)})")
+
+            if max_rows_to_process_this_run != -1:
+                remaining_rows_to_process_for_run = max_rows_to_process_this_run - rows_processed_in_this_run
+                logger.info(f"DEBUG CHK1 PRE-LIMIT: remaining_rows_to_process_for_run={remaining_rows_to_process_for_run}")
+                if remaining_rows_to_process_for_run <= 0:
+                    logger.info(f"DEBUG CHK1 PRE-LIMIT: Breaking because remaining_rows_to_process_for_run ({remaining_rows_to_process_for_run}) <= 0.")
+                    break # Already processed enough for this run
+                rows_to_take_from_this_chunk = min(rows_to_take_from_this_chunk, remaining_rows_to_process_for_run)
+                logger.info(f"DEBUG CHK1 PRE-LIMIT: rows_to_take_from_this_chunk_after_limit_check={rows_to_take_from_this_chunk}")
+
+            if rows_to_take_from_this_chunk <= 0:
+                total_rows_iterated_from_csv += current_chunk_size # Still need to account for iterating past it
+                # This condition might be hit if max_rows_to_process_this_run was small and already satisfied by previous chunks
+                # or if the start_row_index_in_csv is beyond this chunk after accounting for offset.
+                if max_rows_to_process_this_run != -1 and rows_processed_in_this_run >= max_rows_to_process_this_run:
+                    break
+                continue
+
+            # Slice the chunk to get the actual data for processing in this iteration
+            jira_tickets_df_chunk_for_processing = raw_chunk_df.iloc[offset_in_chunk_for_start_row : offset_in_chunk_for_start_row + rows_to_take_from_this_chunk]
+            total_rows_iterated_from_csv += current_chunk_size # Always advance by full raw chunk iterated
+
+            if jira_tickets_df_chunk_for_processing.empty:
+                continue
+
+            current_run_batch_log_idx = (rows_processed_in_this_run // MAIN_CSV_CHUNK_SIZE) + 1 # For logging batch number within this run
+            logger.info(f"--- Processing Run Batch {current_run_batch_log_idx} (derived from CSV rows approx. {start_row_index_in_csv + rows_processed_in_this_run} to {start_row_index_in_csv + rows_processed_in_this_run + len(jira_tickets_df_chunk_for_processing) -1}) --- Shape: {jira_tickets_df_chunk_for_processing.shape}")
+
+            # 3a. Clean data for the current processing chunk
+            logger.info(f"Starting data cleaning process for run batch {current_run_batch_log_idx}...")
+            try:
+                # Use .copy() on the slice to avoid SettingWithCopyWarning later
+                jira_tickets_df_cleaned_chunk = clean_all_columns(jira_tickets_df_chunk_for_processing.copy()) 
+                logger.info(f"Data cleaning finished for run batch {current_run_batch_log_idx}. DataFrame shape: {jira_tickets_df_cleaned_chunk.shape}")
+                non_empty_comments = len(jira_tickets_df_cleaned_chunk[jira_tickets_df_cleaned_chunk['cleaned_comments'].str.len() > 0])
+                logger.info(f"Run batch {current_run_batch_log_idx}: Number of tickets with non-empty cleaned_comments: {non_empty_comments}")
+            except Exception as e:
+                logger.error(f"Error during data cleaning for run batch {current_run_batch_log_idx}: {e}", exc_info=True)
+                logger.warning(f"Skipping run batch {current_run_batch_log_idx} due to data cleaning error.")
+                rows_processed_in_this_run += len(jira_tickets_df_chunk_for_processing) # Count as attempted
+                
+                # DEBUG LOGGING FOR CHECK 2 (Data Clean Fail Path)
+                logger.info(f"DEBUG CHK2 (DataCleanFail): len_chunk_attempted={len(jira_tickets_df_chunk_for_processing)}")
+                logger.info(f"DEBUG CHK2 (DataCleanFail): max_rows_this_run={max_rows_to_process_this_run} (type {type(max_rows_to_process_this_run)}), UPDATED rows_processed_so_far={rows_processed_in_this_run} (type {type(rows_processed_in_this_run)})")
+                comparison_result_chk2_clean_fail = (max_rows_to_process_this_run != -1 and rows_processed_in_this_run >= max_rows_to_process_this_run)
+                logger.info(f"DEBUG CHK2 (DataCleanFail): Comparison (rows_processed_so_far >= max_rows_this_run) is {comparison_result_chk2_clean_fail}")
+                if comparison_result_chk2_clean_fail:
+                    logger.info(f"DEBUG CHK2 (DataCleanFail): Reached max_rows_to_process_this_run ({max_rows_to_process_this_run}). Stopping.")
+                    break
+                continue 
+            
+            # 3b. Prepare Document objects (includes LLM calls) for the current chunk
+            documents_to_embed_initial_chunk, jira_tickets_df_augmented_chunk = prepare_documents_for_embedding(jira_tickets_df_cleaned_chunk)
+            
+            # 3c. Save pre-filter augmented chunk data to CSV
+            if jira_tickets_df_augmented_chunk is not None and not jira_tickets_df_augmented_chunk.empty:
+                augmented_csv_filename = "jira_tickets_with_llm_outputs.csv" # Static filename
+                
+                file_exists_augmented = os.path.exists(augmented_csv_filename)
+                write_mode_augmented = 'a' if file_exists_augmented else 'w'
+                include_header_augmented = not file_exists_augmented
+                
+                try:
+                    jira_tickets_df_augmented_chunk.to_csv(
+                        augmented_csv_filename, 
+                        index=False, 
+                        encoding='utf-8', 
+                        quoting=csv.QUOTE_ALL,
+                        mode=write_mode_augmented,
+                        header=include_header_augmented
+                    )
+                    logger.info(f"Run batch {current_run_batch_log_idx}: Successfully saved/appended augmented Jira tickets ({len(jira_tickets_df_augmented_chunk)} rows) to '{augmented_csv_filename}'.")
+                except Exception as e:
+                    logger.error(f"Run batch {current_run_batch_log_idx}: Failed to save/append augmented data to CSV '{augmented_csv_filename}': {e}", exc_info=True)
+            else:
+                logger.warning(f"Run batch {current_run_batch_log_idx}: Augmented DataFrame is empty or None. Skipping pre-filter CSV export.")
+
+            if not documents_to_embed_initial_chunk:
+                logger.warning(f"Run batch {current_run_batch_log_idx}: No documents prepared for embedding after initial LLM processing. Skipping further processing for this batch.")
+                rows_processed_in_this_run += len(jira_tickets_df_chunk_for_processing)
+
+                # DEBUG LOGGING FOR CHECK 2 (No Docs Initial Path)
+                logger.info(f"DEBUG CHK2 (NoDocsInitial): len_chunk_processed={len(jira_tickets_df_chunk_for_processing)}")
+                logger.info(f"DEBUG CHK2 (NoDocsInitial): max_rows_this_run={max_rows_to_process_this_run} (type {type(max_rows_to_process_this_run)}), UPDATED rows_processed_so_far={rows_processed_in_this_run} (type {type(rows_processed_in_this_run)})")
+                comparison_result_chk2_no_docs_init = (max_rows_to_process_this_run != -1 and rows_processed_in_this_run >= max_rows_to_process_this_run)
+                logger.info(f"DEBUG CHK2 (NoDocsInitial): Comparison (rows_processed_so_far >= max_rows_this_run) is {comparison_result_chk2_no_docs_init}")
+                if comparison_result_chk2_no_docs_init:
+                    logger.info(f"DEBUG CHK2 (NoDocsInitial): Reached max_rows_to_process_this_run ({max_rows_to_process_this_run}). Stopping.")
+                    break
+                continue 
+            logger.info(f"Run batch {current_run_batch_log_idx}: Initial documents prepared after LLM processing: {len(documents_to_embed_initial_chunk)}.")
+
+            # 3d. Perform post-LLM processing (filtering) for the current chunk
+            jira_tickets_df_post_processed_chunk, documents_to_embed_processed_chunk = post_llm_processing(
+                jira_tickets_df_augmented_chunk, 
+                documents_to_embed_initial_chunk
+            )
+
+            # 3e. Save post-filter augmented chunk data to CSV
+            if jira_tickets_df_post_processed_chunk is not None and not jira_tickets_df_post_processed_chunk.empty:
+                post_processed_csv_filename = "jira_tickets_df_augmented_post_process.csv" # Static filename
+
+                file_exists_post_processed = os.path.exists(post_processed_csv_filename)
+                write_mode_post_processed = 'a' if file_exists_post_processed else 'w'
+                include_header_post_processed = not file_exists_post_processed
+                
+                try:
+                    jira_tickets_df_post_processed_chunk.to_csv(
+                        post_processed_csv_filename, 
+                        index=False, 
+                        encoding='utf-8', 
+                        quoting=csv.QUOTE_ALL,
+                        mode=write_mode_post_processed,
+                        header=include_header_post_processed
+                    )
+                    logger.info(f"Run batch {current_run_batch_log_idx}: Successfully saved/appended post-processed augmented tickets ({len(jira_tickets_df_post_processed_chunk)} rows) to '{post_processed_csv_filename}'.")
+                except Exception as e:
+                    logger.error(f"Run batch {current_run_batch_log_idx}: Failed to save/append post-processed data to CSV '{post_processed_csv_filename}': {e}", exc_info=True)
+            else:
+                logger.warning(f"Run batch {current_run_batch_log_idx}: Post-processed DataFrame is empty or None. Skipping post-filter CSV export.")
+
+            if not documents_to_embed_processed_chunk:
+                logger.warning(f"Run batch {current_run_batch_log_idx}: No documents remaining after post-LLM processing. Skipping embedding and upsert for this batch.")
+                rows_processed_in_this_run += len(jira_tickets_df_chunk_for_processing)
+
+                # DEBUG LOGGING FOR CHECK 2 (No Docs PostProc Path)
+                logger.info(f"DEBUG CHK2 (NoDocsPostProc): len_chunk_processed={len(jira_tickets_df_chunk_for_processing)}")
+                logger.info(f"DEBUG CHK2 (NoDocsPostProc): max_rows_this_run={max_rows_to_process_this_run} (type {type(max_rows_to_process_this_run)}), UPDATED rows_processed_so_far={rows_processed_in_this_run} (type {type(rows_processed_in_this_run)})")
+                comparison_result_chk2_no_docs_post = (max_rows_to_process_this_run != -1 and rows_processed_in_this_run >= max_rows_to_process_this_run)
+                logger.info(f"DEBUG CHK2 (NoDocsPostProc): Comparison (rows_processed_so_far >= max_rows_this_run) is {comparison_result_chk2_no_docs_post}")
+                if comparison_result_chk2_no_docs_post:
+                    logger.info(f"DEBUG CHK2 (NoDocsPostProc): Reached max_rows_to_process_this_run ({max_rows_to_process_this_run}). Stopping.")
+                    break # Processed enough for this run
+                continue 
+            logger.info(f"Run batch {current_run_batch_log_idx}: Documents remaining after post-LLM processing: {len(documents_to_embed_processed_chunk)}.")
+
+            # 3f. Get embeddings for the filtered documents in the chunk
+            logger.info(f"Run batch {current_run_batch_log_idx}: Generating embeddings for {len(documents_to_embed_processed_chunk)} documents in batches of {EMBEDDING_BATCH_SIZE}...")
+            texts_to_embed_chunk = [doc.page_content for doc in documents_to_embed_processed_chunk]
+            
+            embeddings_chunk = get_embeddings_in_batches(texts=texts_to_embed_chunk, batch_size=EMBEDDING_BATCH_SIZE)
+
+            if not embeddings_chunk or len(embeddings_chunk) != len(documents_to_embed_processed_chunk):
+                logger.error(f"Run batch {current_run_batch_log_idx}: Failed to generate embeddings or mismatch in count. Expected: {len(documents_to_embed_processed_chunk)}, Got: {len(embeddings_chunk) if embeddings_chunk else 0}. Skipping upsert for this batch.")
+                rows_processed_in_this_run += len(jira_tickets_df_chunk_for_processing)
+
+                # DEBUG LOGGING FOR CHECK 2 (Embedding Fail Path)
+                logger.info(f"DEBUG CHK2 (EmbeddingFail): len_chunk_processed={len(jira_tickets_df_chunk_for_processing)}")
+                logger.info(f"DEBUG CHK2 (EmbeddingFail): max_rows_this_run={max_rows_to_process_this_run} (type {type(max_rows_to_process_this_run)}), UPDATED rows_processed_so_far={rows_processed_in_this_run} (type {type(rows_processed_in_this_run)})")
+                comparison_result_chk2_embed_fail = (max_rows_to_process_this_run != -1 and rows_processed_in_this_run >= max_rows_to_process_this_run)
+                logger.info(f"DEBUG CHK2 (EmbeddingFail): Comparison (rows_processed_so_far >= max_rows_this_run) is {comparison_result_chk2_embed_fail}")
+                if comparison_result_chk2_embed_fail:
+                    logger.info(f"DEBUG CHK2 (EmbeddingFail): Reached max_rows_to_process_this_run ({max_rows_to_process_this_run}). Stopping.")
+                    break
+                continue 
+            logger.info(f"Run batch {current_run_batch_log_idx}: Successfully generated {len(embeddings_chunk)} embeddings.")
+
+            # 3g. Upsert documents and embeddings for the chunk to Pinecone
+            logger.info(f"Run batch {current_run_batch_log_idx}: Upserting {len(documents_to_embed_processed_chunk)} documents to Pinecone in batches of {PINECONE_UPSERT_BATCH_SIZE}...")
+            upsert_documents_to_pinecone(
+                index=pinecone_index,
+                documents=documents_to_embed_processed_chunk,
+                embeddings=embeddings_chunk,
+                batch_size=PINECONE_UPSERT_BATCH_SIZE
+            )
+            logger.info(f"Run batch {current_run_batch_log_idx}: Successfully upserted documents to Pinecone.")
+            
+            rows_processed_in_this_run += len(jira_tickets_df_chunk_for_processing)
+            
+            # DEBUG LOGGING FOR CHECK 2 (Main Success Path)
+            logger.info(f"DEBUG CHK2 (Success): len_chunk_just_processed={len(jira_tickets_df_chunk_for_processing)}")
+            logger.info(f"DEBUG CHK2 (Success): max_rows_this_run={max_rows_to_process_this_run} (type {type(max_rows_to_process_this_run)}), UPDATED rows_processed_so_far={rows_processed_in_this_run} (type {type(rows_processed_in_this_run)})")
+            comparison_result_chk2_success = (max_rows_to_process_this_run != -1 and rows_processed_in_this_run >= max_rows_to_process_this_run)
+            logger.info(f"DEBUG CHK2 (Success): Comparison (rows_processed_so_far >= max_rows_this_run) is {comparison_result_chk2_success}")
+
+            if comparison_result_chk2_success:
+                logger.info(f"Reached max_rows_to_process_this_run ({max_rows_to_process_this_run}). Stopping. Condition was: {rows_processed_in_this_run} >= {max_rows_to_process_this_run}")
+                break # Break from the pd.read_csv loop
+
+    except FileNotFoundError:
+        logger.error(f"CRITICAL: Main CSV file '{CSV_FILENAME}' not found. Aborting pipeline.")
         return
-    logger.info(f"Successfully generated {len(embeddings)} embeddings.")
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during chunk processing loop: {e}", exc_info=True)
+        logger.error("Pipeline may have partially completed. Please check logs and output files.")
+        return
 
-    # 5. Upsert documents and embeddings to Pinecone in batches
-    logger.info(f"Upserting {len(documents_to_embed)} documents to Pinecone in batches of {PINECONE_UPSERT_BATCH_SIZE}...")
-    upsert_documents_to_pinecone(
-        index=pinecone_index,
-        documents=documents_to_embed,
-        embeddings=embeddings,
-        batch_size=PINECONE_UPSERT_BATCH_SIZE
-        # namespace can be added here if needed, e.g., namespace="jira-tickets"
-    )
-
-    logger.info("Jira to Pinecone ingestion pipeline finished successfully.")
+    if rows_processed_in_this_run == 0:
+        logger.info("No batches were processed from the CSV file. This might be due to an empty file or an early error.")
+    else:
+        logger.info(f"Jira to Pinecone ingestion pipeline finished processing {rows_processed_in_this_run // MAIN_CSV_CHUNK_SIZE} batches.")
 
 if __name__ == "__main__":
     # This allows the script to be run directly for testing or manual ingestion
@@ -342,4 +574,16 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv() # Load environment variables from .env
     
-    run_ingestion_pipeline() 
+    # Example 1: Process first 500 data rows (0-499)
+    # run_ingestion_pipeline(start_row_index_in_csv=0, max_rows_to_process_this_run=500)
+    
+    # Example 2: Process next 500 data rows (500-999)
+    # run_ingestion_pipeline(start_row_index_in_csv=500, max_rows_to_process_this_run=500)
+
+    # Example 3: Process all from the beginning
+    # run_ingestion_pipeline()
+    
+    # Default call for testing (e.g., process first 200, then next 300)
+    run_ingestion_pipeline()
+    # To append the next set, you would call for example:
+    # run_ingestion_pipeline(start_row_index_in_csv=200, max_rows_to_process_this_run=300) 

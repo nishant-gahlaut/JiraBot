@@ -3,6 +3,7 @@ import logging
 import re
 import json # Ensure json is imported for pretty printing
 from datetime import datetime
+import os # ADDED: Import os
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,14 @@ def clean_jira_data(raw_issue_data, ticket_id):
     fields = raw_issue_data.get('fields', {})
 
     try:
+        # --- Construct URL ---
+        jira_server_base_url = os.environ.get("JIRA_SERVER", "")
+        if jira_server_base_url:
+            cleaned_data['url'] = f"{jira_server_base_url.rstrip('/')}/browse/{ticket_id}"
+        else:
+            cleaned_data['url'] = "" # Or None, depending on desired handling
+            logger.warning(f"JIRA_SERVER environment variable not set. Cannot construct URL for ticket {ticket_id}.")
+
         # --- Standard/Common Fields ---
         cleaned_data['summary'] = fields.get('summary', '').strip()
         cleaned_data['description'] = (fields.get('description') or '').strip()

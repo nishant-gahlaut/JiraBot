@@ -12,7 +12,7 @@ from jira.exceptions import JIRAError
 
 logger = logging.getLogger(__name__)
 # DB_NAME = "local_jira_cache.db" # REMOVE DB Name
-CSV_FILENAME = "jira_tickets_cache.csv"
+CSV_FILENAME = "jira_tickets_cache01.csv"
 # Define batch size for fetching issues
 BATCH_SIZE = 100
 

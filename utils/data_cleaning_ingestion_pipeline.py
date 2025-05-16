@@ -80,7 +80,8 @@ def remove_urls(text):
     """Remove URLs from text using a robust regex."""
     if not isinstance(text, str):
         return ""
-    url_pattern = r"""\b(?:(?:https?|ftp)://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'\".,<>?«»"“‘’])"""
+    # Simpler URL pattern to reduce risk of catastrophic backtracking
+    url_pattern = r'(?:https?://|ftp://)\S+|www\.\S+'
     text = re.sub(url_pattern, '', text, flags=re.IGNORECASE)
     return text
 

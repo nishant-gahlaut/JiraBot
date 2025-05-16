@@ -2,7 +2,7 @@ import logging
 import json
 from slack_sdk.errors import SlackApiError
 from utils.state_manager import conversation_states
-from services.duplicate_detection_service import summarize_ticket_similarities
+# from services.duplicate_detection_service import summarize_ticket_similarities
 from langchain.schema import Document
 from services.jira_service import fetch_jira_ticket_data
 from services.summarize_service import summarize_jira_ticket

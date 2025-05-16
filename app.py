@@ -8,6 +8,8 @@ from slack_sdk import WebClient
 import json
 from slack_sdk.errors import SlackApiError
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+import time  # Added time module import
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -86,7 +88,7 @@ from services.genai_service import generate_suggested_title, generate_refined_de
 from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, build_rich_ticket_blocks
 
 # Import the duplicate detection service
-from services.duplicate_detection_service import find_and_summarize_duplicates,find_and_summarize_duplicatessss
+from services.duplicate_detection_service import find_and_summarize_duplicates,find_and_summarize_duplicates_mention_flow
 from handlers.modals.modal_builders import build_similar_tickets_modal, build_loading_modal_view, build_description_capture_modal
 
 # Load environment variables from .env file
@@ -446,6 +448,48 @@ def handle_mention_create_ticket_action(ack, body, client, logger):
         logger.info(f"Thread {thread_ts}: Cleared mention context state '{actual_mention_context_key}' after calling orchestrator.")
 
 
+# Helper function to get sort key for tickets
+def get_ticket_sort_key(ticket_result):
+    metadata = ticket_result.get("metadata", {})
+    status = metadata.get('status', '')
+    priority_val = metadata.get('priority', '') # e.g., "Highest-P0"
+    environment_val = metadata.get('environment', '') # e.g., "Prod"
+    updated_at_str = metadata.get('updated_at') # ISO format string
+
+    # 1. Status: 'Closed' tickets first
+    status_sort_key = 0 if status and status.lower() == 'closed' else 1
+
+    # 2. Priority Order (maps to "Highest-P0":0, "High-P1":1, etc.)
+    priority_order_map = {"Highest-P0": 0, "High-P1": 1, "Medium-P2": 2, "Low-P3": 3}
+    priority_sort_key = priority_order_map.get(priority_val, 4) # Default to last if not found
+
+    # 3. Environment Order
+    environment_order_map = {"Prod": 0, "Go-Live": 1, "UAT": 2, "Staging": 3, "Nightly": 4, "Demo": 5}
+    environment_sort_key = environment_order_map.get(environment_val, 6) # Default to last
+
+    # 4. Recency (updated_at) - newest first
+    recency_sort_key = float('inf') # Default for missing/invalid dates (goes last)
+    if updated_at_str:
+        try:
+            # Ensure timezone-aware datetime objects for proper comparison
+            # Replace 'Z' with '+00:00' if present, for fromisoformat
+            if updated_at_str.endswith('Z'):
+                dt_obj = datetime.fromisoformat(updated_at_str[:-1] + '+00:00')
+            else:
+                dt_obj = datetime.fromisoformat(updated_at_str)
+            
+            # If dt_obj is naive, assume UTC (or make this configurable if needed)
+            if dt_obj.tzinfo is None or dt_obj.tzinfo.utcoffset(dt_obj) is None:
+                dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+            
+            recency_sort_key = -dt_obj.timestamp() # Negative timestamp for newest first
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Could not parse updated_at_str '{updated_at_str}' for sorting: {e}")
+            pass # Keep default recency_sort_key if parsing fails
+
+    return (status_sort_key, priority_sort_key, environment_sort_key, recency_sort_key)
+
+
 @app.action("mention_flow_find_issues")
 def handle_mention_find_similar_issues_action(ack, body, client, logger):
     ack()
@@ -504,21 +548,24 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
             text=f"Thanks, <@{user_id}>! Searching for JIRA tickets similar to the conversation summary..."
         )
 
-        duplicate_results = find_and_summarize_duplicatessss(user_query=summary_to_search)
-        top_tickets = duplicate_results.get("tickets", [])
+        duplicate_results = find_and_summarize_duplicates_mention_flow(user_query=summary_to_search)
+        top_tickets_raw = duplicate_results.get("tickets", [])
         overall_summary = duplicate_results.get("summary", "Could not generate an overall summary for similar tickets.")
 
+        # Sort the tickets based on the defined criteria
+        sorted_tickets = sorted(top_tickets_raw, key=get_ticket_sort_key)
+        
         response_blocks = []
-        if top_tickets:
+        if sorted_tickets:
             response_blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"Here are some existing JIRA tickets that might be related to the conversation:"}
+                "text": {"type": "mrkdwn", "text": f"Here are some existing JIRA tickets that might be related to the conversation (sorted by relevance and your criteria):"}
             })
             if overall_summary and overall_summary != "Could not generate an overall summary for similar tickets.":
                  response_blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"_{overall_summary}_"}})
             # response_blocks.append({"type": "divider"}) # Divider will be added by build_rich_ticket_blocks
 
-            for ticket_result in top_tickets:
+            for ticket_result in sorted_tickets: # Iterate over sorted_tickets
                 metadata = ticket_result.get("metadata", {})
                 # TEMP LOG to check owned_by_team value from metadata
                 logger.info(f"DEBUG METADATA ({metadata.get('ticket_id')}): owned_by_team raw value = '{metadata.get('owned_by_team')}', type = {type(metadata.get('owned_by_team'))}")
@@ -735,7 +782,7 @@ def handle_check_similar_issues_shortcut(ack, shortcut, client, logger):
     loading_view_id = None
 
     try:
-        loading_view_payload = build_loading_modal_view("⏳ Analyzing thread and searching for similar issues...")
+        loading_view_payload = build_loading_modal_view("⏳ Analyzing thread and AI is searching for similar issues...")
         loading_modal_response = client.views_open(
             trigger_id=trigger_id,
             view=loading_view_payload
@@ -810,7 +857,10 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
 
         # 3. Generate AI Summary of the Thread
         logger.info(f"Generating AI summary for thread {thread_parent_ts} (first 100 chars of formatted: '{formatted_conversation[:100]}...')")
+        start_time = time.time()
         thread_ai_summary = summarize_thread(formatted_conversation)
+        end_time = time.time()
+        logger.info(f"AI summary generation took {end_time - start_time:.2f} seconds for thread {thread_parent_ts}")
 
         if not thread_ai_summary or thread_ai_summary.startswith("Error:"):
             logger.error(f"Failed to generate AI summary for thread {thread_parent_ts}. AI response: {thread_ai_summary}")
@@ -824,12 +874,18 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
         logger.info(f"AI summary for thread {thread_parent_ts}: '{thread_ai_summary[:100]}...'")
 
         # 4. Find Similar Tickets
+        start_time = time.time()
         duplicate_results = find_and_summarize_duplicates(user_query=thread_ai_summary)
+        end_time = time.time()
+        logger.info(f"Duplicate detection took {end_time - start_time:.2f} seconds for thread {thread_parent_ts}")
         top_similar_tickets_raw = duplicate_results.get("tickets", [])
+
+        # Sort the tickets based on the defined criteria
+        sorted_tickets = sorted(top_similar_tickets_raw, key=get_ticket_sort_key)
 
         # 5. Prepare and Display Results
         similar_tickets_details_for_modal = []
-        for ticket_result in top_similar_tickets_raw:
+        for ticket_result in sorted_tickets: # Iterate over sorted_tickets
             metadata = ticket_result.get("metadata", {})
             
             # TEMP LOG to check owned_by_team value from metadata
@@ -862,7 +918,7 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
             }
             similar_tickets_details_for_modal.append(transformed_ticket)
         
-        final_view_payload = build_similar_tickets_modal(similar_tickets_details_for_modal)
+        final_view_payload = build_similar_tickets_modal(similar_tickets_details_for_modal) # REVERTED: Removed thread_summary argument
         client.views_update(view_id=loading_view_id, view=final_view_payload)
         logger.info(f"Updated modal {loading_view_id} with {len(similar_tickets_details_for_modal)} similar tickets found for thread {thread_parent_ts}.")
 
@@ -1009,10 +1065,13 @@ def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summa
     try:
         logger.info(f"Finding duplicates based on thread summary (first 100 chars): {thread_summary[:100]}...")
         duplicate_results = find_and_summarize_duplicates(user_query=thread_summary)
-        top_similar_tickets = duplicate_results.get("tickets", [])
+        top_similar_tickets_raw = duplicate_results.get("tickets", [])
         
+        # Sort the tickets based on the defined criteria
+        sorted_tickets = sorted(top_similar_tickets_raw, key=get_ticket_sort_key)
+
         similar_tickets_details_for_modal = []
-        for ticket_result in top_similar_tickets:
+        for ticket_result in sorted_tickets: # Iterate over sorted_tickets
             metadata = ticket_result.get("metadata", {})
             problem_statement = ticket_result.get("page_content") 
             solution_summary = metadata.get("retrieved_solution_summary")
@@ -1036,9 +1095,9 @@ def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summa
         if not similar_tickets_details_for_modal:
             logger.info(f"No similar tickets found based on the thread summary for view_id: {view_id}.")
             # Update the modal to say no tickets were found
-            final_view = build_similar_tickets_modal([]) # Pass empty list to show "No tickets" message
+            final_view = build_similar_tickets_modal([]) # REVERTED: Removed thread_summary argument, pass empty list
         else:
-            final_view = build_similar_tickets_modal(similar_tickets_details_for_modal)
+            final_view = build_similar_tickets_modal(similar_tickets_details_for_modal) # REVERTED: Removed thread_summary argument
         
         client.views_update(view_id=view_id, view=final_view)
         logger.info(f"Updated modal {view_id} for user {user_id} with {len(similar_tickets_details_for_modal)} similar tickets.")
@@ -1130,16 +1189,17 @@ if __name__ == "__main__":
         #     # Parameters: project_key, total_tickets_to_scrape, api_batch_size
         #     scraped_count, total_available = scrape_and_store_tickets(
         #         project_key=project_key_to_scrape, 
-        #         total_tickets_to_scrape=2000, # Changed from 2000 to 200
-        #         api_batch_size=100
+        #         total_tickets_to_scrape=100000, # Changed from 2000 to 200
+        #         api_batch_size=300
         #     )
         #     logger.info(f"Jira scraping complete. Scraped/Updated {scraped_count} out of {total_available} available tickets for project {project_key_to_scrape}.")
 
-            # if scraped_count > 0:
-                # logger.info("Proceeding to Pinecone ingestion pipeline...")
-        # run_ingestion_pipeline() # Call the ingestion pipeline
-            # else:
-                # logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
+        #     if scraped_count > 0:
+        #         logger.info("Proceeding to Pinecone ingestion pipeline...")
+        # run_ingestion_pipeline() # Call the ingestion pipeline # Temporarily commented out
+        #         logger.info("Temporarily skipping Pinecone ingestion pipeline after scraping.") # Added temp log
+        #     else:
+        #         logger.info("No tickets were scraped. Skipping Pinecone ingestion pipeline.")
 
         # else:
         #     logger.warning("JIRA_PROJECT_KEY_TO_SCRAPE environment variable not set. Skipping Jira scraping and Pinecone ingestion on startup.")
