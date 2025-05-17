@@ -208,7 +208,7 @@ def handle_summarize_specific_duplicate_ticket(ack, body, client, logger):
             return
 
         summary_text = (
-            f"Here is a summary for ticket *{ticket_id_to_summarize}* (requested by <@{user_id}>):\n\n"
+            f"Here is a summary for ticket *{ticket_id_to_summarize}*:\n\n"
             f"*Status*: {summary_result.get('status', 'N/A')}\n"
             f"*Issue*: {summary_result.get('issue_summary', 'N/A')}\n"
             f"*Resolution/Next Steps*: {summary_result.get('resolution_summary', 'N/A')}"

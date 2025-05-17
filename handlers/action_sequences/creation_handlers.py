@@ -369,7 +369,7 @@ def handle_cancel_creation_at_message_duplicates(ack, body, client, logger):
             client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=f"<@{user_id}>, the ticket creation process has been cancelled."
+                text=f"The ticket creation process has been cancelled."
             )
             logger.info(f"Thread {thread_ts}: Posted ticket creation cancellation confirmation to user {user_id}.")
         else:

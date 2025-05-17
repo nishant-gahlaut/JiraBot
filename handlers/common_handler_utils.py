@@ -102,7 +102,7 @@ def post_summary_with_ctas(client, channel_id, thread_ts, summary_to_display, us
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"<@{user_id}> Here's a summary of our conversation so far:\n>>> {summary_to_display}"
+                "text": f"Here's a summary of our conversation so far:\n>>> {summary_to_display}"
             }
         },
         {
@@ -138,7 +138,7 @@ def post_summary_with_ctas(client, channel_id, thread_ts, summary_to_display, us
             channel=channel_id,
             thread_ts=thread_ts,
             blocks=blocks,
-            text=f"<@{user_id}> Summary & Actions"
+            text="Summary & Actions"
         )
         logger.info(f"Successfully posted summary with general CTAs for {context_key_identifier}.")
     except SlackApiError as e:
@@ -178,7 +178,7 @@ def post_summary_and_final_ctas_for_mention(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"<@{user_id}>, I've processed your request and prepared the following ticket details based on our conversation:"
+                "text": "I've processed your request and prepared the following ticket details based on our conversation:"
             }
         },
         {"type": "divider"}
@@ -268,7 +268,7 @@ def post_summary_and_final_ctas_for_mention(
             channel=channel_id,
             thread_ts=thread_ts,
             blocks=blocks,
-            text=f"<@{user_id}>, I've processed your request to create a ticket. Here's what I've prepared:"
+            text="I've processed your request to create a ticket. Here's what I've prepared:"
         )
         logger.info(f"Successfully posted final CTAs for processed mention {mention_context_key_for_cta}.")
     except SlackApiError as e:

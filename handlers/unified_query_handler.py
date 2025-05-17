@@ -97,7 +97,7 @@ def process_user_query(
             client.chat_postMessage( # Sync call
                 channel=channel_id,
                 thread_ts=reply_ts,
-                text=f"<@{user_id}> Sorry, I encountered an error trying to understand your request. Please try again later."
+                text="Sorry, I encountered an error trying to understand your request. Please try again later."
             )
         except Exception as e_post:
             logger.error(f"Failed to send AI error message to user: {e_post}")
@@ -109,7 +109,7 @@ def process_user_query(
             client.chat_postMessage( # Sync call
                 channel=channel_id,
                 thread_ts=reply_ts,
-                text=f"<@{user_id}> I'm having a little trouble understanding that. Could you try rephrasing?"
+                text="I'm having a little trouble understanding that. Could you try rephrasing?"
             )
         except Exception as e_post:
             logger.error(f"Failed to send AI component error message to user: {e_post}")
@@ -159,7 +159,7 @@ def process_user_query(
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=reply_ts,
-                    text=f"<@{user_id}> {direct_answer}"
+                    text=direct_answer # Remove user mention, post only the answer
                 )
             except Exception as e_post:
                 logger.error(f"Failed to post direct answer: {e_post}")
@@ -170,7 +170,7 @@ def process_user_query(
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=reply_ts,
-                    text=f"<@{user_id}> I've processed your query. I can help with Jira tasks like creating tickets or finding similar issues. How can I assist you today?"
+                    text="I can help with Jira tasks like creating tickets or finding similar issues. How can I assist you today?"
                 )
             except Exception as e_post:
                 logger.error(f"Failed to post Q&A conversational follow-up: {e_post}")
@@ -181,7 +181,7 @@ def process_user_query(
             client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=reply_ts,
-                text=f"<@{user_id}> Hi there! I can help with Jira tasks like creating tickets or finding similar issues. What can I do for you today?"
+                text="Hi there! I can help with Jira tasks like creating tickets or finding similar issues. What can I do for you today?"
             )
         except Exception as e_post:
             logger.error(f"Failed to post CLARIFICATION conversational response: {e_post}")
@@ -207,7 +207,7 @@ def process_user_query(
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=reply_ts,
-                    text=f'<@{user_id}> Understood. I\'m looking for similar issues based on: "{contextual_summary[:150]}..."'
+                    text=f'Understood. I\'m looking for similar issues based on: "{contextual_summary[:150]}..."'
                 )
             except Exception as e_post_initial_msg:
                 logger.error(f"Failed to post 'looking for similar issues' message: {e_post_initial_msg}")
@@ -226,7 +226,7 @@ def process_user_query(
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=reply_ts,
-                    text=f"<@{user_id}> I understood you want to find similar issues, but I'm having trouble accessing that feature right now."
+                    text="I understood you want to find similar issues, but I'm having trouble accessing that feature right now."
                 )
             except Exception as e_post_import_error:
                 logger.error(f"Failed to post FIND_SIMILAR_ISSUES import error message: {e_post_import_error}")
@@ -236,7 +236,7 @@ def process_user_query(
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=reply_ts,
-                    text=f"<@{user_id}> Sorry, an error occurred while trying to find similar issues."
+                    text="Sorry, an error occurred while trying to find similar issues."
                 )
             except Exception as e_post_general_error:
                 logger.error(f"Failed to post FIND_SIMILAR_ISSUES general flow error message: {e_post_general_error}")       
@@ -246,7 +246,7 @@ def process_user_query(
             client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=reply_ts,
-                text=f"<@{user_id}> I'm not quite sure what you mean. Could you please rephrase or tell me what you'd like to do?"
+                text="I'm not quite sure what you mean. Could you please rephrase or tell me what you'd like to do?"
             )
         except Exception as e_post:
             logger.error(f"Failed to post UNCLEAR_INTENT clarification request: {e_post}")
@@ -256,7 +256,7 @@ def process_user_query(
             client.chat_postMessage(
                 channel=channel_id,
                 thread_ts=reply_ts,
-                text=f"<@{user_id}> I'm not quite sure how to help with that. Can you please clarify your request?"
+                text="I'm not quite sure how to help with that. Can you please clarify your request?"
             )
         except Exception as e_post:
             logger.error(f"Failed to post UNKNOWN_INTENT clarification request: {e_post}") 

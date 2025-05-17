@@ -157,53 +157,20 @@ def handle_assistant_thread_started(event, client, context, logger):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "Hello! How can I help you with Jira today?"
+                "text": "👋 Hello! I'm your conversational AI Jira Assistant. 🤖"
             }
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Create Ticket",
-                        "emoji": True
-                    },
-                    "action_id": "create_ticket_action",
-                    "style": "primary"
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "Summarize Ticket",
-                        "emoji": True
-                    },
-                    "action_id": "summarize_ticket_action"
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "My Tickets",
-                        "emoji": True
-                    },
-                    "action_id": "my_tickets_action" # New action ID
-                }
-            ]
         }
     ]
 
     try:
-        # Post the initial message with buttons in the assistant thread
+        # Post the initial message
         client.chat_postMessage(
             channel=channel_id,
-            thread_ts=thread_ts, # Post in the specific assistant thread
+            thread_ts=thread_ts,
             blocks=initial_blocks,
-            text="Hello! How can I help you with Jira today?" # Fallback text
+            text="👋 Hello! I'm your conversational AI Jira Assistant. 🤖"
         )
-        logger.info(f"Posted initial CTAs to thread {thread_ts}")
+        logger.info(f"Posted initial conversational message to thread {thread_ts}")
 
         # Clear the status after posting message (if set previously)
         # if assistant_id:
@@ -576,7 +543,7 @@ def handle_mention_find_similar_issues_action(ack, body, client, logger):
             channel=channel_id, 
             thread_ts=thread_ts, 
             user=user_id,
-            text=f"Thanks, <@{user_id}>! Searching for JIRA tickets similar to the conversation summary..."
+            text=f"Thanks. Searching for JIRA tickets similar to the conversation summary..."
         )
 
         duplicate_results = find_and_summarize_duplicates_mention_flow(user_query=summary_to_search)

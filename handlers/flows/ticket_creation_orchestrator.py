@@ -53,7 +53,7 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"<@{user_id}>, thanks for the description. Before we proceed, I found some tickets that might be similar to your request:"
+                    "text": f"Thanks for the description. Before we proceed, I found some tickets that might be similar to your request:"
                 }
             }
         ]
@@ -124,14 +124,14 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
         logger.error(f"Thread {thread_ts}: Orchestrator - Slack API Error: {e_slack}", exc_info=True)
         # Try to inform the user in the thread
         try:
-            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"<@{user_id}>, sorry, I encountered a Slack API error while checking for similar tickets. Please try again.")
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"Sorry, I encountered a Slack API error while checking for similar tickets. Please try again.")
         except Exception as e_post_err:
             logger.error(f"Thread {thread_ts}: Orchestrator - Failed to post Slack API error message to user: {e_post_err}")
     except Exception as e:
         logger.error(f"Thread {thread_ts}: Orchestrator - Unexpected error: {e}", exc_info=True)
         # Try to inform the user in the thread
         try:
-            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"<@{user_id}>, sorry, an unexpected error occurred while checking for similar tickets. Please try again.")
+            client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=f"Sorry, an unexpected error occurred while checking for similar tickets. Please try again.")
         except Exception as e_post_err:
             logger.error(f"Thread {thread_ts}: Orchestrator - Failed to post unexpected error message to user: {e_post_err}")
     finally:
