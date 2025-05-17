@@ -23,7 +23,7 @@ vector_store: Optional[PineconeIndex] = initialize_pinecone_vector_store(embeddi
 def retrieve_top_k_tickets(query: str, k: int = 10) -> List[Document]:
     logger.info(f"Retrieving top {k} initial tickets for query: '{query[:100]}...'")
     documents = []
-    MIN_PINECONE_SCORE_FOR_LLM_CANDIDACY = 0.70 # Define the threshold
+    MIN_PINECONE_SCORE_FOR_LLM_CANDIDACY = float(os.environ.get("MIN_PINECONE_SCORE_THRESHOLD", "0.50"))  # Get threshold from env var with default
 
     if vector_store and embeddings:
         try:
@@ -102,64 +102,122 @@ def retrieve_top_k_tickets(query: str, k: int = 10) -> List[Document]:
         return []
 
 
-def rerank_tickets_with_llm(query: str, docs: List[Document], top_n: int = 3) -> List[Document]:
+def rerank_tickets_with_llm(query: str, docs: List[Document], top_n: int = 5) -> List[Document]:
     if not docs:
         logger.warning("No documents provided to rerank_tickets_with_llm. Returning empty list.")
         return []
     if not llm:
         logger.warning("LLM not available for reranking. Returning original top_n documents without reranking.")
-        return docs[:top_n]
+        # Fallback: return original docs, perhaps sorted by initial score if available, up to top_n
+        # This is a simple fallback, could be made more sophisticated
+        sorted_docs_by_score = sorted(docs, key=lambda d: d.metadata.get('score', 0.0), reverse=True)
+        return sorted_docs_by_score[:top_n]
 
-    logger.info(f"Reranking {len(docs)} documents for query: '{query[:100]}...' to get top {top_n}.")
-    # Include ticket_id in the formatted docs for better context if the LLM needs it (and for logging)
-    formatted_docs_for_prompt = "\n".join([
-        f"[{i+1}] ID: {doc.metadata.get('ticket_id', 'N/A')} Score: {doc.metadata.get('score', 'N/A'):.4f}\nContent: {doc.page_content[:500]}..." 
-        for i, doc in enumerate(docs)
-    ])
-    prompt_to_llm = RERANK_DUPLICATE_TICKETS_PROMPT.format(top_n=top_n, query=query, formatted_docs=formatted_docs_for_prompt)
+    logger.info(f"Reranking {len(docs)} documents for query: '{query[:100]}...' using LLM to make YES/NO decisions.")
     
-    logger.debug(f"Prompt sent to LLM for reranking:\n---\n{prompt_to_llm}\n---")
+    # Prepare documents for the prompt, ensuring 1-based indexing for `original_index`
+    formatted_docs_for_prompt_list = []
+    for i, doc in enumerate(docs):
+        ticket_id = doc.metadata.get('ticket_id', 'N/A')
+        pinecone_score = doc.metadata.get('score', 'N/A')
+        score_str = f"{pinecone_score:.4f}" if isinstance(pinecone_score, float) else str(pinecone_score)
+        # Ensure content is not overly long for the prompt
+        content_snippet = doc.page_content[:1000] # Increased snippet length for better context
+        if len(doc.page_content) > 1000:
+            content_snippet += "... (truncated)"
+        formatted_docs_for_prompt_list.append(
+            f"[{i+1}] Ticket ID: {ticket_id} | Pinecone Score: {score_str}\nContent: {content_snippet}"
+        )
+    formatted_docs_str = "\n\n".join(formatted_docs_for_prompt_list)
+
+    # Note: The new prompt does not use {top_n} directly in its template for LLM response generation count.
+    # The LLM should process all documents and we will filter/sort later based on its response.
+    prompt_to_llm = RERANK_DUPLICATE_TICKETS_PROMPT.format(query=query, formatted_docs=formatted_docs_str)
+    
+    logger.debug(f"Prompt sent to LLM for reranking decision (first 500 chars):\n---\n{prompt_to_llm[:500]}...\n---")
 
     raw_llm_response = "<LLM_RESPONSE_UNAVAILABLE>"
     try:
         llm_result = llm.invoke(prompt_to_llm)
         raw_llm_response = getattr(llm_result, 'content', str(llm_result)).strip()
-        logger.info(f"Raw LLM response for reranking: '{raw_llm_response}'")
+        logger.info(f"Raw LLM response for reranking (first 300 chars): '{raw_llm_response[:300]}...'")
         
-        parsed_indices_str = raw_llm_response.replace("[", "").replace("]", "").split(",")
-        indices = []
-        for val_str in parsed_indices_str:
-            val_str_stripped = val_str.strip()
-            if val_str_stripped.isdigit():
-                indices.append(int(val_str_stripped) - 1) # Adjust to 0-based index
-            elif val_str_stripped:
-                logger.warning(f"Non-digit value '{val_str_stripped}' found in LLM reranking response. Ignoring.")
-        
-        logger.info(f"Parsed indices from LLM response: {indices}")
+        # Clean potential markdown ```json ... ```
+        cleaned_llm_response = raw_llm_response
+        if cleaned_llm_response.startswith("```json"):
+            cleaned_llm_response = cleaned_llm_response[len("```json"):].strip()
+        if cleaned_llm_response.endswith("```"):
+            cleaned_llm_response = cleaned_llm_response[:-len("```")].strip()
 
-        reranked_documents = []
-        seen_original_indices = set()
-        for index_from_llm in indices:
-            if 0 <= index_from_llm < len(docs):
-                if index_from_llm not in seen_original_indices: # Ensure uniqueness based on original doc index
-                    reranked_documents.append(docs[index_from_llm])
-                    seen_original_indices.add(index_from_llm)
-                else:
-                    logger.warning(f"LLM returned duplicate original index {index_from_llm+1}. Keeping first occurrence.")
-            else:
-                logger.warning(f"LLM returned out-of-bounds index: {index_from_llm+1}. Max original index is {len(docs)}.")
+        llm_evaluations = json.loads(cleaned_llm_response)
         
-        final_reranked_list = reranked_documents[:top_n] # Ensure we only take top_n unique docs
-        logger.info(f"Successfully reranked. Selected {len(final_reranked_list)} documents from {len(docs)} initial.")
+        if not isinstance(llm_evaluations, list):
+            logger.error(f"LLM response was not a list as expected. Response: {cleaned_llm_response}")
+            raise ValueError("LLM response was not a list.")
+
+        logger.info(f"Successfully parsed {len(llm_evaluations)} evaluations from LLM.")
+
+        accepted_documents_with_scores = []
+        for eval_item in llm_evaluations:
+            if not isinstance(eval_item, dict):
+                logger.warning(f"Skipping invalid item in LLM response (not a dict): {eval_item}")
+                continue
+
+            is_similar = eval_item.get('is_similar')
+            llm_score = eval_item.get('llm_similarity_score')
+            original_index_1_based = eval_item.get('original_index')
+            ticket_id_from_llm = eval_item.get('ticket_id') # For logging/verification
+            reasoning = eval_item.get('reasoning', 'No reasoning provided.')
+
+            if is_similar == "YES":
+                if isinstance(llm_score, (float, int)) and isinstance(original_index_1_based, int):
+                    original_index_0_based = original_index_1_based - 1
+                    if 0 <= original_index_0_based < len(docs):
+                        doc_to_add = docs[original_index_0_based]
+                        # Store LLM score for sorting, and also original Pinecone score for reference if needed
+                        doc_to_add.metadata['llm_similarity_score'] = float(llm_score)
+                        doc_to_add.metadata['llm_reasoning'] = reasoning
+                        doc_to_add.metadata['llm_decision'] = "YES"
+                        accepted_documents_with_scores.append(doc_to_add)
+                        logger.info(f"  LLM ACCEPTED: Ticket ID {ticket_id_from_llm} (Original Index {original_index_1_based}), LLM Score: {llm_score:.4f}, Pinecone: {doc_to_add.metadata.get('score', 'N/A'):.4f}. Reason: {reasoning}")
+                    else:
+                        logger.warning(f"LLM returned valid 'YES' but out-of-bounds original_index: {original_index_1_based}. Max original index is {len(docs)}.")
+                else:
+                    logger.warning(f"LLM returned 'YES' but with invalid score ('{llm_score}') or index ('{original_index_1_based}') for ticket {ticket_id_from_llm}. Skipping.")
+            elif is_similar == "NO":
+                 logger.info(f"  LLM REJECTED: Ticket ID {ticket_id_from_llm} (Original Index {original_index_1_based}), LLM Score: {llm_score if isinstance(llm_score, (float,int)) else 'N/A'}, Pinecone: {docs[original_index_1_based-1].metadata.get('score', 'N/A') if 0 <= original_index_1_based-1 < len(docs) else 'N/A'}. Reason: {reasoning}")
+                 # Optionally, store NO decisions if needed for analysis later, e.g., in doc.metadata
+                 if isinstance(original_index_1_based, int) and 0 <= original_index_1_based -1 < len(docs):
+                     docs[original_index_1_based-1].metadata['llm_decision'] = "NO"
+                     if isinstance(llm_score, (float, int)):
+                         docs[original_index_1_based-1].metadata['llm_similarity_score'] = float(llm_score)
+                     if reasoning:
+                         docs[original_index_1_based-1].metadata['llm_reasoning'] = reasoning
+            else:
+                logger.warning(f"LLM returned unknown 'is_similar' value: '{is_similar}' for ticket {ticket_id_from_llm}. Skipping.")
+
+        # Sort the accepted documents by LLM similarity score in descending order
+        sorted_accepted_documents = sorted(accepted_documents_with_scores, key=lambda d: d.metadata.get('llm_similarity_score', 0.0), reverse=True)
+        
+        final_reranked_list = sorted_accepted_documents[:top_n] # Apply top_n to the LLM-approved and sorted list
+        logger.info(f"LLM processing complete. Selected {len(final_reranked_list)} documents out of {len(docs)} initial candidates (after 'YES' filter and sorting by LLM score). Target top_n was {top_n}.")
         return final_reranked_list
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from LLM response: {e}", exc_info=True)
+        logger.error(f"LLM raw response at time of JSON error: '{raw_llm_response}'")
+        logger.warning("Fallback: Returning original top_n documents (sorted by Pinecone score) due to LLM JSON parsing error.")
+        sorted_docs_by_score = sorted(docs, key=lambda d: d.metadata.get('score', 0.0), reverse=True)
+        return sorted_docs_by_score[:top_n]
     except Exception as e:
         logger.error(f"Error during LLM reranking or parsing: {e}", exc_info=True)
         logger.error(f"LLM raw response at time of error (if available): '{raw_llm_response}'")
-        logger.warning("Fallback: Returning original top_n documents due to reranking error.")
-        return docs[:top_n]
+        logger.warning("Fallback: Returning original top_n documents (sorted by Pinecone score) due to general reranking error.")
+        sorted_docs_by_score = sorted(docs, key=lambda d: d.metadata.get('score', 0.0), reverse=True)
+        return sorted_docs_by_score[:top_n]
 
 
-def find_and_summarize_duplicates_mention_flow(user_query: str, retrieve_k: int = 10, rerank_n: int = 3) -> dict:
+def find_and_summarize_duplicates_mention_flow(user_query: str, retrieve_k: int = 20, rerank_n: int = 5) -> dict:
     logger.info(f"Starting duplicate detection pipeline with find_and_summarize_duplicates for query: '{user_query[:100]}...'")
 
     initial_tickets = retrieve_top_k_tickets(user_query, k=retrieve_k)

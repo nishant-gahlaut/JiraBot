@@ -23,16 +23,47 @@ Resolution/Next Steps Summary (1-2 sentences):
 """ 
 
 # Prompt for reranking retrieved tickets based on a query
-RERANK_DUPLICATE_TICKETS_PROMPT = """You are an assistant. Given the following user query and retrieved tickets,
-rank the tickets by relevance and return the top {top_n} ones.
+RERANK_DUPLICATE_TICKETS_PROMPT = """You are an expert technical assistant specializing in Jira issue analysis and duplicate detection.
+Your task is to evaluate a list of potentially relevant Jira tickets against a user's query.
+For each ticket, you must decide if it is genuinely a duplicate or highly relevant to the user's query, considering the initial similarity score provided (Pinecone Score).
 
-Query: {query}
+User Query:
+{query}
 
-Tickets:
+Tickets to Evaluate:
 {formatted_docs}
 
-Respond with only the most relevant {top_n} ticket numbers as a list (e.g., 1,3,5).
-If you think none are relevant or cannot determine, respond with an empty list or 'None'.
+Instructions:
+For each ticket provided in the "Tickets to Evaluate" section:
+1.  Analyze the ticket's content (ID, Pinecone Score, and Content snippet) in relation to the "User Query".
+2.  The "Pinecone Score" is an initial similarity measure.
+    *   If Pinecone Score > 0.85: The ticket is likely relevant. Confirm this and assess the actual degree of similarity.
+    *   If Pinecone Score <= 0.85 (but >= 0.65, the pre-filter): Critically evaluate if the ticket's *intent and core problem* truly match the user's query. Do not rely solely on keyword overlap. The goal is to identify genuine semantic matches.
+3.  Provide a "YES" or "NO" decision for `is_similar`.
+    *   "YES": The ticket is highly relevant or a likely duplicate in terms of core problem and intent.
+    *   "NO": The ticket is not sufficiently relevant or is only superficially similar (e.g., keyword matches but different intent).
+4.  Provide an `llm_similarity_score` (float between 0.0 and 1.0) representing your confidence in the similarity. A higher score means more confident "YES". For "NO" decisions, this score can be low (e.g., < 0.5) but should still reflect any partial relevance if present.
+5.  Optionally, provide a brief `reasoning` (1-2 sentences) for your decision, especially for "NO" or borderline "YES" cases.
+
+Output Format:
+Respond with ONLY a valid JSON list of objects. Each object in the list must correspond to one of the input tickets, maintaining the original order.
+Each JSON object must contain the following keys:
+-   `original_index`: The 1-based index of the ticket from the input list (e.g., the number in `[X] ID: ...`).
+-   `ticket_id`: The actual Ticket ID (e.g., "PROJECT-123").
+-   `is_similar`: Your decision ("YES" or "NO").
+-   `llm_similarity_score`: Your calculated similarity score (float, 0.0 to 1.0).
+-   `reasoning`: (Optional) Brief explanation for your decision.
+
+Example of a single JSON object in the list:
+{{
+  "original_index": 1,
+  "ticket_id": "TECH-789",
+  "is_similar": "YES",
+  "llm_similarity_score": 0.92,
+  "reasoning": "The core problem described matches the user's query about login failures after the recent update."
+}}
+
+Ensure your entire response is a single JSON array. Do not include any text before or after the JSON array.
 """
 
 # Prompt for summarizing similarities between a query and a list of tickets
