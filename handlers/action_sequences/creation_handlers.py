@@ -306,10 +306,9 @@ def handle_generate_ai_ticket_details_after_duplicates(ack, body, client, logger
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (f"Thanks! Based on your input, I suggest the following details for the Jira ticket:\n\n"
-                             f"*Suggested Title:* {suggested_title}\n\n"
-                             f"*Suggested Description:*\n```{ai_refined_description}```\n\n"
-                             f"Would you like to proceed with these AI-generated details, or modify them further?"
+                    "text": (f"*AI Suggested Title:* {suggested_title}\n\n"
+                             f"*AI Suggested Description:*\n```{ai_refined_description}```\n\n"
+                             f"Would you like to proceed with above details, or modify them further?"
                             )
                 }
             },

@@ -178,7 +178,7 @@ def post_summary_and_final_ctas_for_mention(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "I've processed your request and prepared the following ticket details based on our conversation:"
+                "text": "Based on your request, I've prepared the following ticket details."
             }
         },
         {"type": "divider"}

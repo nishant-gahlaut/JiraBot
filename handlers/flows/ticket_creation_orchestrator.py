@@ -48,15 +48,7 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
             "pre_existing_ai_description": pre_existing_description
         }
 
-        blocks_for_duplicates = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"Thanks for the description. Before we proceed, I found some tickets that might be similar to your request:"
-                }
-            }
-        ]
+        blocks_for_duplicates = []
 
         if top_tickets:
             for i, ticket_dict in enumerate(top_tickets):
@@ -69,6 +61,10 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
                 priority = current_metadata.get('priority', 'Unknown')
                 assignee = current_metadata.get('assignee', 'Unassigned')
                 issue_type = current_metadata.get('issue_type', 'Unknown')
+                
+                # Get description and resolution for display
+                description_to_display = current_metadata.get('retrieved_problem_statement', '_No description available_')
+                resolution_to_display = current_metadata.get('retrieved_solution_summary', '_Resolution not available_')
 
                 ticket_data_for_helper = {
                     'ticket_key': ticket_key,
@@ -77,27 +73,16 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
                     'status': status,
                     'priority': priority,
                     'assignee': assignee,
-                    'issue_type': issue_type
+                    'issue_type': issue_type,
+                    'description': description_to_display,
+                    'resolution': resolution_to_display
                 }
 
-                action_elements_for_ticket = [{
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Summarize this ticket", "emoji": True},
-                    "action_id": "summarize_specific_duplicate_ticket",
-                    "value": json.dumps({
-                        "ticket_id_to_summarize": ticket_key,
-                        "thread_ts": str(thread_ts),
-                        "channel_id": str(channel_id),
-                        "user_id": str(user_id),
-                        "assistant_id": str(assistant_id) if assistant_id else None
-                    })
-                }]
+                action_elements_for_ticket = []
                 
                 rich_ticket_display_blocks = build_rich_ticket_blocks(ticket_data_for_helper, action_elements_for_ticket)
                 blocks_for_duplicates.extend(rich_ticket_display_blocks)
 
-            if overall_similarity_summary:
-                blocks_for_duplicates.append({"type": "section", "text": {"type": "mrkdwn", "text": f"""*Overall Similarity Summary:*\n{overall_similarity_summary}"""}})
         else:
             blocks_for_duplicates.append({"type": "section", "text": {"type": "mrkdwn", "text": "I didn't find any strong matches for existing tickets. You can proceed with creating a new one."}})
 

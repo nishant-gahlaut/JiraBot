@@ -51,14 +51,22 @@ Provide a detailed but concise summary.
 
 # New prompt for summarizing a Slack conversation thread
 SUMMARIZE_SLACK_THREAD_PROMPT = """
-Summarize the following Slack thread conversation concisely. Focus on the main topic, any problems raised, and proposed solutions or next steps mentioned. Extract the core information relevant for understanding the situation quickly.
+Analyze the following Slack thread conversation. Your goal is to extract a concise, factual summary of the **core technical problem or question** being discussed. This summary will be used for similarity searches against a knowledge base of existing issues.
+
+**Instructions for the summary:**
+- Focus exclusively on the underlying technical issue, bug, or request.
+- OMIT all user names, mentions, or any phrases attributing statements to specific people (e.g., "User A said...", "X is asking about...").
+- EXCLUDE greetings, salutations, thank yous, and other conversational filler.
+- DO NOT include any proposed solutions, workarounds, or next steps from the thread. Only summarize the problem itself.
+- The summary should be phrased as a neutral statement of the problem.
+
 
 Conversation:
 ---
 {thread_content}
 ---
 
-Concise Summary:"""
+Concise Problem-Focused Summary:"""
 
 # Prompt for generating a concise Jira ticket title from user description
 GENERATE_TICKET_TITLE_PROMPT = """
@@ -84,7 +92,9 @@ Refined Jira Ticket Description:"""
 
 # Prompt for generating Title and Description in one go (JSON output)
 GENERATE_TICKET_TITLE_AND_DESCRIPTION_PROMPT = """
-Analyze the user description below. Generate a concise Jira ticket title and a refined, detailed Jira ticket description. 
+Please act as a helpful Jira assistant. Analyze the User Description and generate the following components in a VALID JSON format:
+1.  "suggested_title": A clear and concise Jira ticket title based on the problem.
+2.  "refined_description": A well-structured Jira ticket description, including key details from the conversation. If the conversation is very short and is already a good description, you can use that.
 Output *only* a valid JSON object with the keys "suggested_title" and "refined_description".
 
 User Description:

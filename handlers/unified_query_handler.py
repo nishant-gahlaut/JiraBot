@@ -207,7 +207,7 @@ def process_user_query(
                 client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=reply_ts,
-                    text=f'Understood. I\'m looking for similar issues based on: "{contextual_summary[:150]}..."'
+                    text=f'Please wait while I check for similar issues..."'
                 )
             except Exception as e_post_initial_msg:
                 logger.error(f"Failed to post 'looking for similar issues' message: {e_post_initial_msg}")

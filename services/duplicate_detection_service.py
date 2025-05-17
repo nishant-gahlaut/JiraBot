@@ -23,41 +23,58 @@ vector_store: Optional[PineconeIndex] = initialize_pinecone_vector_store(embeddi
 def retrieve_top_k_tickets(query: str, k: int = 10) -> List[Document]:
     logger.info(f"Retrieving top {k} initial tickets for query: '{query[:100]}...'")
     documents = []
+    MIN_PINECONE_SCORE_FOR_LLM_CANDIDACY = 0.70 # Define the threshold
+
     if vector_store and embeddings:
         try:
             query_embedding = embeddings.embed_query(query)
             logger.debug(f"Query embedded. Searching Pinecone index...")
             results = search_pinecone_index(index=vector_store, query_vector=query_embedding, k=k, namespace=None)
-            logger.info(f"Pinecone search returned {len(results) if results else 0} matches.")
+            logger.info(f"Pinecone search returned {len(results) if results else 0} raw matches.")
 
             for i, match in enumerate(results):
                 metadata = match.get('metadata', {})
-                # Try to get content from specific fields, then fallback
                 content = metadata.get('page_content', 
                                      metadata.get('description', 
                                                   metadata.get('summary', '')))
-                # Remove the used content field from metadata to avoid redundancy if it was 'page_content'
-                # and to ensure 'page_content' in metadata is the one from Document schema if added by user
                 if 'page_content' in metadata and content == metadata['page_content']:
-                    metadata_for_doc = metadata.copy() # Avoid modifying original dict from search results directly if it was to be reused
-                    # metadata_for_doc.pop('page_content', None) # Let langchain Document handle its own page_content
+                    metadata_for_doc = metadata.copy()
                 else:
                     metadata_for_doc = metadata
                 
                 metadata_for_doc['score'] = match.get('score')
                 doc = Document(page_content=content, metadata=metadata_for_doc)
                 documents.append(doc)
-                logger.debug(f"  Retrieved Initial Doc {i+1} (ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {doc.metadata.get('score')}, Length: {len(doc.page_content)} chars):")
-                try:
-                    metadata_json = json.dumps(doc.metadata, indent=2, default=str)
-                    for line in metadata_json.splitlines():
-                        logger.debug(f"    {line}")
-                    content_snippet = doc.page_content[:200].replace('\n', ' ')
-                    logger.debug(f"    Content Snippet: {content_snippet}...")
-                except Exception as log_e:
-                    logger.warning(f"    Error logging details for initial doc {doc.metadata.get('ticket_id', 'N/A')}: {log_e}")
-            logger.info(f"Processed {len(documents)} documents from Pinecone results.")
-            return documents
+                # Reduced logging here as we will log filtered docs later
+                # logger.debug(f"  Retrieved Raw Doc {i+1} (ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {doc.metadata.get('score')})")
+
+            logger.info(f"Processed {len(documents)} raw documents from Pinecone results.")
+
+            # Log all raw documents and their scores before filtering
+            if documents:
+                logger.info(f"--- Scores for {len(documents)} raw documents retrieved from Pinecone (before filtering) ---")
+                for i, doc in enumerate(documents):
+                    raw_score = doc.metadata.get('score', 'N/A')
+                    raw_ticket_id = doc.metadata.get('ticket_id', 'N/A')
+                    logger.info(f"  Raw Doc {i+1}: ID: {raw_ticket_id}, Score: {raw_score if isinstance(raw_score, str) else f'{raw_score:.4f}'}")
+                logger.info("-------------------------------------------------------------------")
+
+            # Filter documents based on the score threshold
+            filtered_documents = []
+            if documents:
+                logger.info(f"Filtering {len(documents)} documents with threshold: score >= {MIN_PINECONE_SCORE_FOR_LLM_CANDIDACY}")
+                for doc in documents:
+                    score = doc.metadata.get('score', 0.0) # Default to 0.0 if score is missing
+                    if score >= MIN_PINECONE_SCORE_FOR_LLM_CANDIDACY:
+                        filtered_documents.append(doc)
+                        logger.info(f"  KEEPING Doc ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {score:.4f}")
+                    else:
+                        logger.debug(f"  FILTERING OUT Doc ID: {doc.metadata.get('ticket_id', 'N/A')}, Score: {score:.4f} (Below threshold)")
+                logger.info(f"{len(filtered_documents)} documents remaining after score filtering.")
+            else:
+                logger.info("No documents retrieved from Pinecone to filter.")
+            
+            return filtered_documents
         except Exception as e:
             logger.error("Pinecone search error during initial retrieval:", exc_info=True)
             # Fall through to FAISS if Pinecone fails mid-operation
@@ -252,7 +269,7 @@ def summarize_ticket_similarities(query: str, docs: List[Document]) -> str:
         logger.error(f"Error during LLM summarization: {e}", exc_info=True)
         return f"Error: Could not generate summary for similar tickets ({e})"
 
-def find_and_summarize_duplicates(user_query: str, retrieve_k: int = 10, rerank_n: int = 3) -> dict:
+def find_and_summarize_duplicates(user_query: str, retrieve_k: int = 20, rerank_n: int = 5) -> dict:
     logger.info(f"Starting duplicate detection pipeline with find_and_summarize_duplicates for query: '{user_query[:100]}...'")
 
     # 1. Retrieve top k tickets

@@ -65,6 +65,8 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, or
             'assignee': (str, optional) The display name of the assignee.
             'issue_type': (str, optional) The name of the issue type.
             'owned_by_team': (str, optional) The name of the team that owns the ticket.
+            'description': (str, optional) The ticket description.
+            'resolution': (str, optional) The ticket resolution summary.
         action_elements (list, optional): A list of Slack action elements (buttons)
                                           to append to the ticket display.
 
@@ -80,6 +82,8 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, or
     assignee = ticket_data.get('assignee', 'Unassigned')
     issue_type = ticket_data.get('issue_type', 'N/A')
     owned_by_team = ticket_data.get('owned_by_team', 'N/A')
+    description = ticket_data.get('description', '') # Get description
+    resolution = ticket_data.get('resolution', '')   # Get resolution
 
     type_emoji = get_issue_type_emoji(issue_type)
     priority_emoji = get_priority_emoji(priority)
@@ -119,6 +123,34 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, or
             "type": "context",
             "elements": [{"type": "mrkdwn", "text": details_text}]
         })
+
+    # Add Description
+    if description and description != '_No description available_': # Check against placeholder
+        blocks.extend([
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Description:"}
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f">>>{description[:1500]}"} # Truncate for Slack block limits
+            }
+        ])
+
+    # Add Resolution
+    if resolution and resolution != '_Resolution not available_': # Check against placeholder
+        blocks.extend([
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Resolution:"}
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f">>>{resolution[:1500]}"} # Truncate for Slack block limits
+            }
+        ])
 
     if action_elements and isinstance(action_elements, list) and len(action_elements) > 0:
         blocks.append({
