@@ -140,28 +140,47 @@ VALID JSON Output:
 """
 
 # Prompt for processing a mention, understanding intent, and generating components (JSON output)
-PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """
+PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """\
 Analyze the user's direct message to the bot and the recent conversation history provided below.
-Determine the user's primary intent (e.g., 'create_ticket', 'find_similar_tickets', 'clarification', 'unrelated').
-Generate a concise contextual summary based on the direct message and history.
-If the intent seems to be 'create_ticket' or involves describing a problem, generate a suggested Jira ticket title and a refined Jira ticket description.
-Output *only* a valid JSON object containing:
-- "intent": The determined user intent string.
-- "contextual_summary": A brief summary of the conversation context.
-- "suggested_title": A relevant Jira ticket title (or null/empty if intent is not creation-related).
-- "refined_description": A detailed Jira ticket description (or null/empty if intent is not creation-related).
+Your primary goal is to understand the user's needs and prepare information for potential Jira ticket creation or other actions.
+
+1.  **Determine Intent**: Identify the user's primary intent (e.g., 'CREATE_TICKET', 'FIND_SIMILAR_TICKETS', 'CLARIFICATION', 'GENERAL_QUESTION', 'UNRELATED').
+
+2.  **Generate Contextual Summary (`contextual_summary`)**: 
+    Create a very brief, on-point summary (1-2 sentences) of *the core problem or topic reported/discussed by the user*. 
+    This summary MUST focus solely on the essence of what the user is reporting or discussing. 
+    Do NOT include any mention of the user's request for action (e.g., do not say 'user wants to create a ticket'). 
+    Do NOT include any specific user names.
+
+3.  **Generate Ticket Components (if applicable)**:
+    *   If the intent strongly suggests creating a ticket or involves describing a problem, then generate:
+        a.  `suggested_title`: A relevant and concise Jira ticket title. Do NOT include user names.
+        b.  `refined_description`: A Jira ticket description that *details the problem or the user's request as comprehensively as possible based on the provided input (direct message and history)*. This description MUST focus exclusively on explaining the issue. Do NOT include suggested solutions, questions back to the user, any conversational fluff, or specific user names. If the user provided specific details about the problem, ensure those details are captured here. It should be a clear, detailed problem statement suitable for a Jira ticket.
+    *   If the intent is NOT related to ticket creation or problem reporting (e.g., 'CLARIFICATION', 'GENERAL_QUESTION' where a direct answer is expected), set `suggested_title` and `refined_description` to null or an empty string.
+
+4.  **Generate Direct Answer (`direct_answer` if applicable)**:
+    *   If the intent is 'GENERAL_QUESTION' or 'QUESTION_ANSWERING' and a direct, factual answer can be derived from the conversation, provide it in `direct_answer`.
+    *   Otherwise, set `direct_answer` to null or an empty string.
+
+Output *only* a valid JSON object containing these exact keys:
+-   `intent`: The determined user intent string (e.g., "CREATE_TICKET", "FIND_SIMILAR_TICKETS", "CLARIFICATION", "GENERAL_QUESTION").
+-   `contextual_summary`: The very brief, problem-focused summary (NO user names, NO request for action).
+-   `suggested_title`: The Jira ticket title (string, or null/empty if not applicable; NO user names).
+-   `refined_description`: The detailed, problem-focused Jira ticket description (string, or null/empty if not applicable; NO user names).
+-   `direct_answer`: A direct answer to a user's question (string, or null/empty if not applicable).
 
 User Direct Message to Bot:
 ---
 {user_direct_message_to_bot}
 ---
 
-Recent Conversation History:
+Recent Conversation History (if any, may be empty):
 ---
 {formatted_conversation_history}
 ---
 
-JSON Output:"""
+VALID JSON Output (ensure all keys are present, even if value is null/empty for some based on intent):
+"""
 
 # Prompt for generating a concise problem statement for embedding
 GENERATE_CONCISE_PROBLEM_STATEMENT_PROMPT = """

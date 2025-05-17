@@ -75,8 +75,8 @@ from handlers.action_sequences.summarization_handlers import (
     handle_summarize_specific_duplicate_ticket
 )
 
-# Import mention handler
-from handlers.mention_handler import handle_app_mention_event, fetch_conversation_context_for_mention, format_messages_for_summary, summarize_conversation
+# Import mention handler (updated import)
+from handlers.mention_handler import handle_app_mention_event
 
 # Import mention flow handlers
 from handlers.modals.interaction_handlers import build_create_ticket_modal
@@ -90,6 +90,12 @@ from utils.slack_ui_helpers import get_issue_type_emoji, get_priority_emoji, bui
 # Import the duplicate detection service
 from services.duplicate_detection_service import find_and_summarize_duplicates,find_and_summarize_duplicates_mention_flow
 from handlers.modals.modal_builders import build_similar_tickets_modal, build_loading_modal_view, build_description_capture_modal
+
+# Import the unified query processor
+from handlers.unified_query_handler import process_user_query
+
+# Import common handler utilities including the newly added format_messages_for_summary
+from handlers.common_handler_utils import format_messages_for_summary
 
 # Load environment variables from .env file
 load_dotenv()
@@ -308,27 +314,54 @@ def handle_context_changed(event, logger):
     # Track the user's active context if needed
 
 
-# 3 & 4: Listen and respond to message.im
-@app.event("message") # Catches Direct Messages (IMs) and potentially others
-def handle_message_events(message, client, context, logger):
-    """Handles messages sent directly to the bot by routing to message_handler."""
-    # Route the event to the dedicated handler function
-    handle_message(message, client, context, logger)
-
-
-# --- Event Handlers ---
+# Combined message event handler
 @app.event("message")
-def message_event(message, say, client, context, logger):
-    logger.info(f"Received message event: {message}")
-    handle_message(message=message, client=client, context=context, logger=logger)
+def route_all_message_events(event, client, context, logger):
+    """
+    Primary router for all 'message' events.
+    Handles direct messages by routing to process_user_query.
+    Handles other channel messages by routing to the generic handle_message.
+    """
+    if event.get("channel_type") == "im":
+        logger.info(f"Received direct message event for unified processing: {json.dumps(event, indent=2)}")
 
+        bot_user_id = context.get("bot_user_id")
+        user_id = event.get("user")
+        channel_id = event.get("channel") 
+        message_ts = event.get("ts")
+        user_message_text = event.get("text", "")
+        thread_ts_for_context = event.get("thread_ts")
+
+        if user_id == bot_user_id:
+            logger.info("Ignoring message from self in DM.")
+            return
+
+        if not all([bot_user_id, user_id, channel_id, message_ts]):
+            logger.error("Missing critical information from DM event. Cannot proceed with unified_query_handler.")
+            return
+
+        # Call the unified query processor for DMs
+        process_user_query(
+            client=client,
+            bot_user_id=bot_user_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts_for_context,
+            message_ts=message_ts,
+            user_message_text=user_message_text,
+            is_direct_message=True,
+            assistant_id=context.get("assistant_id")
+        )
+    else:
+        # For non-DM messages, route to the original generic message handler
+        logger.info(f"Received non-DM message event, routing to generic handle_message: {json.dumps(event, indent=2)}")
+        handle_message(event, client, context, logger)
+
+
+# --- Event Handlers (app_mention specifically) ---
 @app.event("app_mention")
 def app_mention_event_handler(event, client, context, logger):
     logger.info(f"Received app_mention event: {event}")
-    # Add bot_user_id to context if not already present by Bolt
-    # Bolt's context for events usually includes `bot_user_id` and `authorizations`
-    # If context doesn't have bot_user_id, it might need to be fetched or passed during app init.
-    # For now, assuming context['bot_user_id'] is available.
     if 'bot_user_id' not in context:
         logger.warning("bot_user_id not in context for app_mention event. Fetching auth.test...")
         try:
@@ -337,8 +370,6 @@ def app_mention_event_handler(event, client, context, logger):
             logger.info(f"Fetched bot_user_id: {context['bot_user_id']}")
         except Exception as e:
             logger.error(f"Failed to fetch bot_user_id via auth.test: {e}")
-            # Potentially critical, the mention handler might not work correctly without it
-            # For now, we'll let it proceed, but mention_handler has a check
     
     handle_app_mention_event(event=event, client=client, logger_param=logger, context=context)
 
@@ -819,6 +850,60 @@ def handle_check_similar_issues_shortcut(ack, shortcut, client, logger):
             except Exception as e_update:
                 logger.error(f"Failed to update loading modal with general error: {e_update}")
 
+# --- Shortcut Handler for "Check Similar Issues" ---
+@app.action("check_similar_issues_button_action")
+def handle_check_similar_issues_button_action(ack, body, client, logger):
+    # This is a button action, not a shortcut.
+    # It's triggered by a button in a modal, not a shortcut.
+    # It's triggered by a button in a modal, not a shortcut.  
+    ack()  # Acknowledge immediately
+    trigger_id = body["trigger_id"]
+    user_id = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    message_context_ts = body["message"]["ts"] 
+    thread_parent_ts = body["message"].get("thread_ts", message_context_ts)
+    
+    logger.info(f"'Check Similar Issues' shortcut: User {user_id} in channel {channel_id}, on message {message_context_ts}, for thread {thread_parent_ts}.")
+    loading_view_id = None
+
+    try:
+        loading_view_payload = build_loading_modal_view("⏳ Analyzing thread and AI is searching for similar issues...")
+        loading_modal_response = client.views_open(
+            trigger_id=trigger_id,
+            view=loading_view_payload
+        )
+        loading_view_id = loading_modal_response["view"]["id"]
+        logger.info(f"Opened loading modal {loading_view_id} for 'Check Similar Issues' for user {user_id}.")
+
+        # Phase 2: Submit to Executor (UNCOMMENTED)
+        app_executor.submit(
+            _task_check_similar_from_thread_and_display, # Target function for background task
+            client=client,
+            logger=logger,
+            loading_view_id=loading_view_id,
+            channel_id=channel_id, # Pass for fetching replies
+            thread_parent_ts=thread_parent_ts, # Pass for fetching replies
+            user_id=user_id # For logging or context if needed by the task,
+        )
+        logger.info(f"Submitted background task for {loading_view_id} to check similar issues from thread.")
+
+    except SlackApiError as e:
+        logger.error(f"Slack API error in handle_check_similar_issues_shortcut: {e.response['error']}", exc_info=True)
+        if loading_view_id:
+            try:
+                error_view = build_loading_modal_view(f"A Slack API error occurred: {e.response['error']}. Please try again.")
+                client.views_update(view_id=loading_view_id, view=error_view)
+            except Exception as e_update:
+                logger.error(f"Failed to update loading modal with Slack API error: {e_update}")
+    except Exception as e:
+        logger.error(f"Unexpected error in handle_check_similar_issues_shortcut: {e}", exc_info=True)
+        if loading_view_id:
+            try:
+                error_view = build_loading_modal_view("An unexpected error occurred. Please try again.")
+                client.views_update(view_id=loading_view_id, view=error_view)
+            except Exception as e_update:
+                logger.error(f"Failed to update loading modal with general error: {e_update}")
+
 
 # Phase 3: Implement the Background Task Function
 def _task_check_similar_from_thread_and_display(client, logger, loading_view_id, channel_id, thread_parent_ts, user_id):
@@ -1000,7 +1085,7 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
             return
 
         logger.info(f"AI Suggested Title: {ai_title}")
-        logger.info(f"AI Refined Description: {ai_description[:200]}...")
+        logger.info(f"AI Description: {ai_description[:200]}...")
         if thread_summary and not thread_summary.startswith("Error:"):
              logger.info(f"AI Thread Summary (for context/debugging): {thread_summary[:200]}...")
         else:

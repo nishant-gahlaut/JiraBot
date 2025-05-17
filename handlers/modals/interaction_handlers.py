@@ -234,8 +234,13 @@ def handle_modal_submission(ack, body, client, view, logger):
     channel_id = metadata.get("channel_id")
     thread_ts = metadata.get("thread_ts")
     thread_summary_for_button = metadata.get("thread_summary", "")
+    # If thread_summary wasn't found, try checking for ai_summary_for_context (from mention/DM flow)
     if not thread_summary_for_button:
-        logger.warning("thread_summary not found in private_metadata for 'View Similar Tickets' button.")
+        thread_summary_for_button = metadata.get("ai_summary_for_context", "")
+        if thread_summary_for_button:
+            logger.info("Used 'ai_summary_for_context' from private_metadata for 'View Similar Tickets' button.")
+        else:
+            logger.warning("Neither 'thread_summary' nor 'ai_summary_for_context' found in private_metadata. 'View Similar Tickets' button will be skipped.")
 
     # --- Extract submitted values (SAFELY) ---
     try:
