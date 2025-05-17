@@ -157,7 +157,7 @@ def handle_assistant_thread_started(event, client, context, logger):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "👋 Hello! I'm your conversational AI Jira Assistant. 🤖"
+                "text": "👋 Hii..! Let's get started. I'm here to help as your conversational AI Jira Assistant. 🤖"
             }
         }
     ]
@@ -168,7 +168,7 @@ def handle_assistant_thread_started(event, client, context, logger):
             channel=channel_id,
             thread_ts=thread_ts,
             blocks=initial_blocks,
-            text="👋 Hello! I'm your conversational AI Jira Assistant. 🤖"
+            text="👋 Hii..! Let's get started. I'm here to help as your conversational AI Jira Assistant. 🤖"
         )
         logger.info(f"Posted initial conversational message to thread {thread_ts}")
 
@@ -449,23 +449,34 @@ def handle_mention_create_ticket_action(ack, body, client, logger):
 # Helper function to get sort key for tickets
 def get_ticket_sort_key(ticket_result):
     metadata = ticket_result.get("metadata", {})
+    
+    # 1. Primary Sort: LLM Similarity Score (descending)
+    # Default to a very low score if not present, so these go to the bottom if mixed with scored items.
+    llm_score = metadata.get('llm_similarity_score', -1.0) # Use -1.0 to ensure unscored are last
+    
+    # For descending sort on score, we typically use score directly with reverse=True in sorted(),
+    # or negate the score if we want to use it in a tuple for ascending sort.
+    # Since we are returning a tuple for multi-level sort, we'll negate it.
+    primary_sort_key = -float(llm_score) # Negate for ascending sort based on this tuple element
+
+    # Secondary Sort Criteria (existing logic)
     status = metadata.get('status', '')
     priority_val = metadata.get('priority', '') # e.g., "Highest-P0"
     environment_val = metadata.get('environment', '') # e.g., "Prod"
     updated_at_str = metadata.get('updated_at') # ISO format string
 
-    # 1. Status: 'Closed' tickets first
+    # 2. Status: 'Closed' tickets first (after LLM score)
     status_sort_key = 0 if status and status.lower() == 'closed' else 1
 
-    # 2. Priority Order (maps to "Highest-P0":0, "High-P1":1, etc.)
+    # 3. Priority Order (maps to "Highest-P0":0, "High-P1":1, etc.)
     priority_order_map = {"Highest-P0": 0, "High-P1": 1, "Medium-P2": 2, "Low-P3": 3}
     priority_sort_key = priority_order_map.get(priority_val, 4) # Default to last if not found
 
-    # 3. Environment Order
+    # 4. Environment Order
     environment_order_map = {"Prod": 0, "Go-Live": 1, "UAT": 2, "Staging": 3, "Nightly": 4, "Demo": 5}
     environment_sort_key = environment_order_map.get(environment_val, 6) # Default to last
 
-    # 4. Recency (updated_at) - newest first
+    # 5. Recency (updated_at) - newest first
     recency_sort_key = float('inf') # Default for missing/invalid dates (goes last)
     if updated_at_str:
         try:
@@ -485,7 +496,7 @@ def get_ticket_sort_key(ticket_result):
             logger.warning(f"Could not parse updated_at_str '{updated_at_str}' for sorting: {e}")
             pass # Keep default recency_sort_key if parsing fails
 
-    return (status_sort_key, priority_sort_key, environment_sort_key, recency_sort_key)
+    return (primary_sort_key, status_sort_key, priority_sort_key, environment_sort_key, recency_sort_key)
 
 
 @app.action("mention_flow_find_issues")

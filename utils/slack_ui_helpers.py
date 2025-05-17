@@ -138,13 +138,17 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, or
             }
         ])
 
-    # Add Resolution
+    # Add Resolution or Progress Summary based on status
+    resolution_label = "Progress Summary:"
+    if status and status.lower() == "closed":
+        resolution_label = "Resolution:"
+
     if resolution and resolution != '_Resolution not available_': # Check against placeholder
         blocks.extend([
             {"type": "divider"},
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": "Resolution:"}
+                "text": {"type": "mrkdwn", "text": resolution_label}
             },
             {
                 "type": "section",
