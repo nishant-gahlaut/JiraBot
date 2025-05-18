@@ -157,7 +157,7 @@ def handle_assistant_thread_started(event, client, context, logger):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "👋 Hii..! Let's get started. I'm here to help as your conversational AI Jira Assistant. 🤖"
+                "text": "You can describe an issue, and I'll help you create a Jira ticket or check for similar ones."
             }
         }
     ]
@@ -167,8 +167,13 @@ def handle_assistant_thread_started(event, client, context, logger):
         client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
-            blocks=initial_blocks,
-            text="👋 Hii..! Let's get started. I'm here to help as your conversational AI Jira Assistant. 🤖"
+            attachments=[
+                {
+                    "color": "#439FE0",
+                    "blocks": initial_blocks
+                }
+            ],
+            text="👋 Hello.I'm your conversational AI Jira Assistant 🤖: " # MODIFIED: Generic fallback text
         )
         logger.info(f"Posted initial conversational message to thread {thread_ts}")
 
@@ -996,13 +1001,19 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
             }
             similar_tickets_details_for_modal.append(transformed_ticket)
         
+        # Store detailed ticket info for later retrieval in submission handler
+        if loading_view_id and similar_tickets_details_for_modal:
+            conversation_states[f"{loading_view_id}_displayed_tickets"] = similar_tickets_details_for_modal
+            logger.info(f"Stored {len(similar_tickets_details_for_modal)} displayed ticket details in conversation_states for {loading_view_id}")
+
         final_view_payload = build_similar_tickets_modal(
             similar_tickets_details_for_modal,
             channel_id=channel_id, # For modal's own context
             source=current_source,
             original_ticket_key=None, # No original ticket context in this specific flow
             add_continue_creation_button=True,
-            continue_creation_thread_info=continue_thread_info
+            continue_creation_thread_info=continue_thread_info,
+            loading_view_id=loading_view_id # Pass loading_view_id
         )
         client.views_update(view_id=loading_view_id, view=final_view_payload)
         logger.info(f"Updated modal {loading_view_id} with {len(similar_tickets_details_for_modal)} similar tickets found for thread {thread_parent_ts}.")
@@ -1411,12 +1422,22 @@ def _task_find_and_display_similar_tickets(client, logger, view_id, thread_summa
             }
             similar_tickets_details_for_modal.append(transformed_ticket)
 
+        # Store detailed ticket info for later retrieval in submission handler
+        if view_id and similar_tickets_details_for_modal: # view_id is the loading_view_id here
+            conversation_states[f"{view_id}_displayed_tickets"] = similar_tickets_details_for_modal
+            logger.info(f"Stored {len(similar_tickets_details_for_modal)} displayed ticket details in conversation_states for {view_id}")
+
         if not similar_tickets_details_for_modal:
             logger.info(f"No similar tickets found based on the thread summary for view_id: {view_id}.")
-            # Update the modal to say no tickets were found
-            final_view = build_similar_tickets_modal([]) # REVERTED: Removed thread_summary argument, pass empty list
+            final_view = build_similar_tickets_modal([])
         else:
-            final_view = build_similar_tickets_modal(similar_tickets_details_for_modal,channel_id,source, original_ticket_key) # REVERTED: Removed thread_summary argument
+            final_view = build_similar_tickets_modal(
+                similar_tickets_details_for_modal,
+                channel_id,
+                source, 
+                original_ticket_key,
+                loading_view_id=view_id # Pass loading_view_id (which is view_id here)
+            ) 
         
         client.views_update(view_id=view_id, view=final_view)
         logger.info(f"Updated modal {view_id} for user {user_id} with {len(similar_tickets_details_for_modal)} similar tickets.")
@@ -1657,59 +1678,120 @@ def handle_similar_tickets_submission(ack, body, client, logger):
                 ack({"response_action": "update", "view": error_view})
                 return
 
-            current_description = original_ticket.get("description", "")
-            linked_section_header = "\n\n---\n*Linked Tickets:*"
-            links_to_add_str = ""
-            newly_linked_count = 0
-            for ticket_key_to_link in selected_ticket_keys:
-                link_line = f"\n• {ticket_key_to_link}"
-                if not (linked_section_header in current_description and link_line in current_description):
-                    links_to_add_str += link_line
-                    newly_linked_count += 1
+            current_description = original_ticket.get("description", "").strip()
+            final_description = current_description # Start with current description
+            description_updated_with_similar_tickets = False # Flag for similar tickets section
+            description_updated_with_linked_summaries = False # Flag for summaries from linked tickets
 
-            if newly_linked_count == 0:
-                logger.info(f"All selected tickets {selected_ticket_keys} already appear to be linked to {original_ticket_key} (from view submission).")
+            # Part 1: Build and add Similar Tickets links
+            similar_tickets_header_text = "\n\n---\n*Similar Tickets:*"
+            links_text_to_append = ""
+            actual_new_links_count = 0
+
+            for ticket_key_to_link in selected_ticket_keys:
+                link_line_for_check = f"• {ticket_key_to_link}"
+                if not (similar_tickets_header_text in final_description and link_line_for_check in final_description):
+                    links_text_to_append += f"\n• {ticket_key_to_link}"
+                    actual_new_links_count += 1
+            
+            if actual_new_links_count > 0:
+                if similar_tickets_header_text not in final_description:
+                    if final_description and not final_description.endswith('\n'):
+                        final_description += '\n' # Add newline if current description doesn't end with one
+                    final_description += similar_tickets_header_text
+                final_description += links_text_to_append + "\n"
+                description_updated_with_similar_tickets = True
+
+            # Part 2: Add Solution Summaries from selected linked tickets
+            loading_view_id = private_metadata.get("loading_view_id")
+            linked_ticket_summaries_content = ""
+            if loading_view_id:
+                displayed_tickets_info = conversation_states.pop(f"{loading_view_id}_displayed_tickets", None)
+                if displayed_tickets_info:
+                    logger.info(f"Retrieved {len(displayed_tickets_info)} displayed ticket details from conversation_states for {loading_view_id}")
+                    for s_key in selected_ticket_keys:
+                        for ticket_info in displayed_tickets_info:
+                            if ticket_info.get('key') == s_key:
+                                solution_summary = ticket_info.get('retrieved_solution_summary')
+                                if solution_summary and solution_summary != '_(Resolution details not found)_' and solution_summary != '_(Problem details not found)_': # Ensure summary is meaningful
+                                    # Add newline if current description doesn't end with one, before adding the section
+                                    if linked_ticket_summaries_content == "" and final_description and not final_description.endswith('\n'):
+                                        linked_ticket_summaries_content += '\n'
+                                    linked_ticket_summaries_content += f"\n---\n*Summary from {s_key}:*\n{solution_summary}\n"
+                                    description_updated_with_linked_summaries = True
+                                break # Found the selected ticket's info
+                else:
+                    logger.warning(f"Could not retrieve displayed_tickets_info from conversation_states for {loading_view_id}")
+            else:
+                logger.warning("loading_view_id not found in private_metadata. Cannot fetch linked ticket summaries.")
+            
+            if linked_ticket_summaries_content: # Append all collected summaries to the final description
+                final_description += linked_ticket_summaries_content
+
+            # Determine if any update is needed to Jira
+            if not description_updated_with_similar_tickets and not description_updated_with_linked_summaries:
+                logger.info(f"No new links to add for {original_ticket_key}, and no new summaries from linked tickets to add.")
                 already_linked_view = {
-                    "type": "modal", "title": {"type": "plain_text", "text": "Already Linked"},
-                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"It looks like the selected tickets are already linked to <{original_ticket.get('url')}|{original_ticket_key}>."}}],
+                    "type": "modal", "title": {"type": "plain_text", "text": "No Changes"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"It looks like the selected tickets are already linked to <{original_ticket.get('url')}|{original_ticket_key}>, and no new progress summary needs to be added."}}],
                     "close": {"type": "plain_text", "text": "Close"}
                 }
                 ack({"response_action": "update", "view": already_linked_view})
                 return
 
-            updated_description = current_description
-            if linked_section_header not in updated_description:
-                updated_description += linked_section_header
-            updated_description += links_to_add_str
-            updated_description += "\n"
-
-            update_payload = {"key": original_ticket_key, "description": updated_description}
-            update_success = update_jira_ticket(update_payload)
+            # If we are here, either new links or new summaries (or both) need to be added to the description.
+            if description_updated_with_similar_tickets or description_updated_with_linked_summaries:
+                update_payload = {"key": original_ticket_key, "description": final_description.strip()}
+                update_success = update_jira_ticket(update_payload)
             
-            if update_success:
-                logger.info(f"Jira ticket link update successful for {original_ticket_key}. Updating modal with success.")
-                success_linking_modal_view = {
-                    "type": "modal",
-                    "title": {"type": "plain_text", "text": "✅ Link Successful"},
-                    "blocks": [{
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"Successfully linked {newly_linked_count} ticket(s) to <{original_ticket.get('url')}|{original_ticket_key}>!"}
-                    }],
+                if update_success:
+                    logger.info(f"Jira ticket update successful for {original_ticket_key} with similar tickets and/or linked summaries.")
+                    linked_message_part = f"Successfully linked {actual_new_links_count} ticket(s)" if description_updated_with_similar_tickets else ""
+                    summary_message_part = "Summaries from linked tickets added" if description_updated_with_linked_summaries else ""
+                    
+                    final_success_message = ""
+                    if linked_message_part and summary_message_part:
+                        final_success_message = f"{linked_message_part} and {summary_message_part.lower()} to <{original_ticket.get('url')}|{original_ticket_key}>!"
+                    elif linked_message_part:
+                        final_success_message = f"{linked_message_part} to <{original_ticket.get('url')}|{original_ticket_key}>!"
+                    elif summary_message_part:
+                        final_success_message = f"{summary_message_part} for <{original_ticket.get('url')}|{original_ticket_key}>!"
+                    else: # Should not happen if we passed the check above, but as a fallback
+                        final_success_message = f"Ticket <{original_ticket.get('url')}|{original_ticket_key}> updated."
+
+                    success_linking_modal_view = {
+                        "type": "modal",
+                        "title": {"type": "plain_text", "text": "✅ Update Successful"},
+                        "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": final_success_message}}],
+                        "close": {"type": "plain_text", "text": "Close"}
+                    }
+                    ack({"response_action": "update", "view": success_linking_modal_view})
+                else: # Jira update failed
+                    logger.error(f"Jira ticket update for linking/progress summary returned False for {original_ticket_key}.")
+                    # ... (existing error linking modal view) ...
+                    error_linking_modal_view = {
+                        "type": "modal",
+                        "title": {"type": "plain_text", "text": "⚠️ Link Failed"},
+                        "blocks": [{
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": f"Sorry, there was an issue updating <{original_ticket.get('url')}|{original_ticket_key}>. The Jira update failed."}
+                        }],
+                        "close": {"type": "plain_text", "text": "Close"}
+                    }
+                    ack({"response_action": "update", "view": error_linking_modal_view})
+            else:
+                # This case means the description effectively did not change, though logic suggested it might.
+                # This could happen if only already linked tickets were selected and progress summary was already there or not provided.
+                # This should have been caught by the (actual_new_links_count == 0 and not description_updated_by_progress_summary) check.
+                # Corrected check:
+                # This should have been caught by the (not description_updated_with_similar_tickets and not description_updated_with_progress_summary) check.
+                logger.info(f"No effective change to description for ticket {original_ticket_key}. Re-confirming as 'No Changes'.")
+                no_effective_change_view = {
+                    "type": "modal", "title": {"type": "plain_text", "text": "No Changes Made"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"No new links were added and progress summary was already up-to-date for <{original_ticket.get('url')}|{original_ticket_key}>."}}],
                     "close": {"type": "plain_text", "text": "Close"}
                 }
-                ack({"response_action": "update", "view": success_linking_modal_view})
-            else: # Jira update failed
-                logger.error(f"Jira ticket update for linking returned False for {original_ticket_key} (view submission). Updating modal with error.")
-                error_linking_modal_view = {
-                    "type": "modal",
-                    "title": {"type": "plain_text", "text": "⚠️ Link Failed"},
-                    "blocks": [{
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"Sorry, there was an issue linking the tickets to <{original_ticket.get('url')}|{original_ticket_key}>. The Jira update failed."}
-                    }],
-                    "close": {"type": "plain_text", "text": "Close"}
-                }
-                ack({"response_action": "update", "view": error_linking_modal_view})
+                ack({"response_action": "update", "view": no_effective_change_view})
 
         else: # Unknown submit_action or no action
             logger.warning(f"Unknown or missing submit_action in similar_tickets_modal. Action: '{submit_action}'. View ID: {current_view_id}")

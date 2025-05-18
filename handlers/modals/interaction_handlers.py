@@ -75,7 +75,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                     "placeholder": {"type": "plain_text", "text": "Enter a detailed description (optional)"},
                     "initial_value": initial_description # Pre-fill description
                 },
-                "label": {"type": "plain_text", "text": "Description (Optional)"},
+                "label": {"type": "plain_text", "text": "Description"},
                 "optional": True
             },
             {
@@ -108,7 +108,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                     "action_id": "assignee_select",
                     "placeholder": {"type": "plain_text", "text": "Select assignee (optional)"}
                 },
-                "label": {"type": "plain_text", "text": "Assignee (Optional)"},
+                "label": {"type": "plain_text", "text": "Assignee"},
                 "optional": True
             },
             {
@@ -124,7 +124,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                         {"text": {"type": "plain_text", "text": "UAT_Team_Bugs"}, "value": "UAT_Team_Bugs"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Labels (Optional)"},
+                "label": {"type": "plain_text", "text": "Labels"},
                 "optional": True
             },
             {
@@ -140,7 +140,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                         {"text": {"type": "plain_text", "text": "Incentive"}, "value": "incentive"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Owned by Team (Optional)"},
+                "label": {"type": "plain_text", "text": "Owned by Team"},
                 "optional": True
             },
             {
@@ -195,7 +195,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                         {"text": {"type": "plain_text", "text": "Platforms"}, "value": "Platforms"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Product (Optional)"},
+                "label": {"type": "plain_text", "text": "Product"},
                 "optional": True
             },
              {
@@ -211,7 +211,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                         {"text": {"type": "plain_text", "text": "Access"}, "value": "access"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Type of Task (Optional)"},
+                "label": {"type": "plain_text", "text": "Type of Task"},
                 "optional": True
             },
             {
@@ -229,7 +229,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                         {"text": {"type": "plain_text", "text": "Other"}, "value": "other"}
                     ]
                 },
-                "label": {"type": "plain_text", "text": "Root Cause(s) (Optional)"},
+                "label": {"type": "plain_text", "text": "Root Cause(s)"},
                 "optional": True
             }
         ]
