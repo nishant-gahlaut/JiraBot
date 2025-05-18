@@ -145,12 +145,21 @@ Please act as a helpful Jira assistant. Analyze the conversation and generate th
 1.  "thread_summary": A concise summary of the entire thread, capturing the main problem and context.
 2.  "suggested_title": A clear and concise Jira ticket title based on the problem.
 3.  "refined_description": A well-structured Jira ticket description, including key details from the conversation. If the conversation is very short and is already a good description, you can use that.
+4.  "priority": The predicted priority of the ticket. 
+    - Default to "Medium-P2" unless there is strong evidence in the conversation suggesting otherwise.
+    - Predict "High-P1" if the conversation explicitly mentions production issues, direct client impact, system outages, or uses terms like 'urgent', 'critical', 'blocker'.
+    - Predict "Highest-P0" only if the impact is extremely severe and widespread, clearly indicated as such in the conversation (e.g., 'entire system down', 'major client outage affecting all users').
+    - Predict "Low-P3" for minor issues, typos, or cosmetic problems with no immediate operational impact.
+    - Must be one of: "Highest-P0", "High-P1", "Medium-P2", "Low-P3".
+5.  "issue_type": The predicted type of the ticket. Must be one of: "Bug", "Task", "Story", "Epic", "Other". If unsure, default to "Task". Consider "Bug" for errors or unexpected behavior, "Task" for work items, "Story" for user-facing features, and "Epic" for larger initiatives.
 
-Your response MUST be only the JSON object, like this:
+Your response MUST be only the JSON object, like this example:
 {{
   "thread_summary": "summary of the thread...",
   "suggested_title": "suggested ticket title...",
-  "refined_description": "refined ticket description..."
+  "refined_description": "refined ticket description...",
+  "priority": "Medium-P2",
+  "issue_type": "Task"
 }}
 """
 
@@ -185,7 +194,10 @@ PROCESS_MENTION_AND_GENERATE_ALL_COMPONENTS_PROMPT = """\
 Analyze the user's direct message to the bot and the recent conversation history provided below.
 Your primary goal is to understand the user's needs and prepare information for potential Jira ticket creation or other actions.
 
-1.  **Determine Intent**: Identify the user's primary intent (e.g., 'CREATE_TICKET', 'FIND_SIMILAR_TICKETS', 'CLARIFICATION', 'GENERAL_QUESTION', 'UNRELATED').
+1.  **Determine Intent**: Identify the user's primary intent. Prioritize as follows:
+    *   If the user explicitly asks to find, search for, or check for similar/existing tickets (e.g., "see if similar ticket exist?", "find similar tickets", "are there any tickets like this?", "check for duplicates"), the intent is **'FIND_SIMILAR_TICKETS'**. In this case, the `contextual_summary` (and potentially `refined_description`) should capture the problem details provided by the user to be used for the search.
+    *   If the user primarily describes a problem, error, or requests a task without explicitly asking to search for existing tickets first, the intent is **'CREATE_TICKET'**.
+    *   Other intents include 'CLARIFICATION', 'GENERAL_QUESTION', 'UNRELATED'.
 
 2.  **Generate Contextual Summary (`contextual_summary`)**: 
     Create a very brief, on-point summary (1-2 sentences) of *the core problem or topic reported/discussed by the user*. 
@@ -197,7 +209,14 @@ Your primary goal is to understand the user's needs and prepare information for 
     *   If the intent strongly suggests creating a ticket or involves describing a problem, then generate:
         a.  `suggested_title`: A relevant and concise Jira ticket title. Do NOT include user names.
         b.  `refined_description`: A Jira ticket description that *details the problem or the user's request as comprehensively as possible based on the provided input (direct message and history)*. This description MUST focus exclusively on explaining the issue. Do NOT include suggested solutions, questions back to the user, any conversational fluff, or specific user names. If the user provided specific details about the problem, ensure those details are captured here. It should be a clear, detailed problem statement suitable for a Jira ticket.
-    *   If the intent is NOT related to ticket creation or problem reporting (e.g., 'CLARIFICATION', 'GENERAL_QUESTION' where a direct answer is expected), set `suggested_title` and `refined_description` to null or an empty string.
+        c.  `priority`: The predicted priority of the ticket. 
+            - Default to "Medium-P2" unless there is strong evidence in the conversation suggesting otherwise.
+            - Predict "High-P1" if the conversation explicitly mentions production issues, direct client impact, system outages, or uses terms like 'urgent', 'critical', 'blocker'.
+            - Predict "Highest-P0" only if the impact is extremely severe and widespread, clearly indicated as such in the conversation (e.g., 'entire system down', 'major client outage affecting all users').
+            - Predict "Low-P3" for minor issues, typos, or cosmetic problems with no immediate operational impact.
+            - Must be one of: "Highest-P0", "High-P1", "Medium-P2", "Low-P3".
+        d.  `issue_type`: The predicted type of the ticket. Must be one of: "Bug", "Task", "Story", "Epic", "Other". If unsure, default to "Task". Consider "Bug" for errors or unexpected behavior, "Task" for work items, "Story" for user-facing features, and "Epic" for larger initiatives.
+    *   If the intent is NOT related to ticket creation or problem reporting (e.g., 'CLARIFICATION', 'GENERAL_QUESTION' where a direct answer is expected), set `suggested_title`, `refined_description`, `priority`, and `issue_type` to null or an empty string.
 
 4.  **Generate Direct Answer (`direct_answer` if applicable)**:
     *   If the intent is 'GENERAL_QUESTION' or 'QUESTION_ANSWERING' and a direct, factual answer can be derived from the conversation, provide it in `direct_answer`.
@@ -208,6 +227,8 @@ Output *only* a valid JSON object containing these exact keys:
 -   `contextual_summary`: The very brief, problem-focused summary (NO user names, NO request for action).
 -   `suggested_title`: The Jira ticket title (string, or null/empty if not applicable; NO user names).
 -   `refined_description`: The detailed, problem-focused Jira ticket description (string, or null/empty if not applicable; NO user names).
+-   `priority`: The predicted priority string (e.g., "Medium-P2", or null/empty if not applicable).
+-   `issue_type`: The predicted issue type string (e.g., "Bug", or null/empty if not applicable).
 -   `direct_answer`: A direct answer to a user's question (string, or null/empty if not applicable).
 
 User Direct Message to Bot:
@@ -221,6 +242,42 @@ Recent Conversation History (if any, may be empty):
 ---
 
 VALID JSON Output (ensure all keys are present, even if value is null/empty for some based on intent):
+Example when intent is to find similar tickets:
+```json
+{{
+  "intent": "FIND_SIMILAR_TICKETS",
+  "contextual_summary": "User reports a discrepancy in Member Care totals, where 9.28 is displayed instead of 9.29.",
+  "suggested_title": "Discrepancy in Member Care bill amount",
+  "refined_description": "There's a discrepancy in the total shown in Member Care — while the user is submitting 9.29 as the bill amount, it's displaying 9.28 instead. They have verified all the itemized charges, and their sum correctly totals to 9.29. A sample cURL call for the Transaction API may be available.",
+  "priority": "Medium-P2",
+  "issue_type": "Bug",
+  "direct_answer": null
+}}
+```
+Example when creating a ticket:
+```json
+{{
+  "intent": "CREATE_TICKET",
+  "contextual_summary": "User reports an error when trying to submit the form ABC.",
+  "suggested_title": "Error on form ABC submission",
+  "refined_description": "When the user navigates to page X and fills out form ABC, upon clicking submit, they receive a 500 internal server error. This started happening after the deployment on Tuesday. Logs show a null pointer exception in the FormProcessor service.",
+  "priority": "High-P1",
+  "issue_type": "Bug",
+  "direct_answer": null
+}}
+```
+Example when intent is not to create a ticket:
+```json
+{{
+  "intent": "GENERAL_QUESTION",
+  "contextual_summary": "User is asking about the release date for version 2.0.",
+  "suggested_title": null,
+  "refined_description": null,
+  "priority": null,
+  "issue_type": null,
+  "direct_answer": "Version 2.0 is scheduled for release next Friday, a week from today."
+}}
+```
 """
 
 # Prompt for generating a concise problem statement for embedding

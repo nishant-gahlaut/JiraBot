@@ -133,15 +133,27 @@ def build_jira_payload_fields(ticket_data_from_slack):
 
     # Components (standard Jira field)
     components_value = ticket_data_from_slack.get("components") # This key comes from interaction_handlers.py
-    if components_value and isinstance(components_value, str) and components_value.strip():
-        component_names = [name.strip() for name in components_value.split(',') if name.strip()]
+
+    if components_value:
+        component_names = []
+        if isinstance(components_value, list):
+            # If it's already a list (likely from modal submission)
+            component_names = [str(name).strip() for name in components_value if str(name).strip()]
+            logger.info(f"Components value is a list: {component_names}")
+        elif isinstance(components_value, str) and components_value.strip():
+            # If it's a comma-separated string
+            component_names = [name.strip() for name in components_value.split(',') if name.strip()]
+            logger.info(f"Components value is a string, parsed to: {component_names}")
+        else:
+            logger.warning(f"Components value is neither a list nor a non-empty string: '{components_value}' (type: {type(components_value)}) Awaiting further processing of other fields.")
+
         if component_names:
             payload_fields["components"] = [{"name": name} for name in component_names]
             logger.info(f"Set Jira components to: {payload_fields['components']}")
         else:
-            logger.info("Components value provided but resulted in empty list after parsing.")
-    elif components_value: # Log if value is present but not a non-empty string
-        logger.warning(f"Components value found but is not a non-empty string: '{components_value}' (type: {type(components_value)})")
+            logger.info("Components value provided but resulted in an empty list after processing. Jira 'components' field will not be set by this logic.")
+    else:
+        logger.info("No 'components' value found in ticket_data_from_slack.")
 
 
     # Handle Custom Fields based on CUSTOM_FIELD_CONFIG

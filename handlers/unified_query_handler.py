@@ -188,21 +188,45 @@ def process_user_query(
         return
     elif intent == "CREATE_TICKET" or intent == "FIND_ISSUES_AND_CREATE":
         logger.info(f"Intent is CREATE_TICKET. Posting CTAs for mention in thread {reply_ts}.")
+        ai_refined_description = ai_components.get("refined_description", contextual_summary)
+        ai_suggested_title = ai_components.get("suggested_title")
+        ai_priority = ai_components.get("priority")
+        ai_issue_type = ai_components.get("issue_type")
+
+        if not ai_priority:
+            logger.warning(f"AI components missing 'priority' for user query intent CREATE_TICKET. User: {user_id}, Channel: {channel_id}")
+        if not ai_issue_type:
+            logger.warning(f"AI components missing 'issue_type' for user query intent CREATE_TICKET. User: {user_id}, Channel: {channel_id}")
+
         post_summary_and_final_ctas_for_mention(
-            client=client, 
-            channel_id=channel_id, 
-            thread_ts=reply_ts, 
+            client=client,
+            channel_id=channel_id,
+            thread_ts=reply_ts,
             summary_to_display=contextual_summary,
-            user_id=user_id, 
-            mention_context_key_for_cta=current_context_key, 
-            ai_suggested_title=suggested_title,
-            ai_refined_description=refined_description
+            user_id=user_id,
+            mention_context_key_for_cta=current_context_key,
+            ai_suggested_title=ai_suggested_title,
+            ai_refined_description=ai_refined_description,
+            ai_priority=ai_priority,
+            ai_issue_type=ai_issue_type
         )
     elif intent == "FIND_SIMILAR_TICKETS":
         logger.info(f"Intent is FIND_SIMILAR_ISSUES. Using summary: {contextual_summary} for thread {reply_ts}.")
         try: # Outer try for the whole FIND_SIMILAR_ISSUES flow
             from handlers.flows.ticket_creation_orchestrator import present_duplicate_check_and_options 
             
+            # NEW: Retrieve AI components for passing to orchestrator
+            ai_suggested_title_for_orchestrator = ai_components.get("suggested_title")
+            ai_refined_description_for_orchestrator = ai_components.get("refined_description")
+            ai_priority_for_orchestrator = ai_components.get("priority")
+            ai_issue_type_for_orchestrator = ai_components.get("issue_type")
+
+            if not ai_priority_for_orchestrator:
+                logger.warning(f"AI components missing 'priority' for user query intent FIND_SIMILAR_TICKETS. User: {user_id}, Channel: {channel_id}")
+            if not ai_issue_type_for_orchestrator:
+                logger.warning(f"AI components missing 'issue_type' for user query intent FIND_SIMILAR_TICKETS. User: {user_id}, Channel: {channel_id}")
+            # Even if title/description are None, pass them as None to the orchestrator.
+
             try: # Inner try for posting the initial message
                 client.chat_postMessage(
                     channel=channel_id,
@@ -217,8 +241,13 @@ def process_user_query(
                 channel_id=channel_id,
                 user_id=user_id,
                 thread_ts=reply_ts,
-                initial_description=contextual_summary,
+                initial_description=contextual_summary, # This is the summary used for search
                 assistant_id=assistant_id,
+                # NEW: Pass AI components
+                ai_suggested_title=ai_suggested_title_for_orchestrator,
+                ai_refined_description=ai_refined_description_for_orchestrator,
+                ai_priority=ai_priority_for_orchestrator,
+                ai_issue_type=ai_issue_type_for_orchestrator
             )
         except ImportError:
             logger.error("ImportError: `present_duplicate_check_and_options` not found. FIND_SIMILAR_ISSUES cannot be fully handled.")

@@ -154,7 +154,9 @@ def post_summary_and_final_ctas_for_mention(
     user_id: str, 
     mention_context_key_for_cta: str,
     ai_suggested_title: str | None = None,
-    ai_refined_description: str | None = None
+    ai_refined_description: str | None = None,
+    ai_priority: str | None = None,
+    ai_issue_type: str | None = None
 ):
     """
     Posts a message after a mention has been processed, showing the summary and specific CTAs
@@ -169,7 +171,9 @@ def post_summary_and_final_ctas_for_mention(
         "user_id": user_id,
         "channel_id": channel_id,
         "thread_ts": thread_ts,
-        "summary_for_confirmation": summary_to_display # The specific summary that was shown
+        "summary_for_confirmation": summary_to_display, # The specific summary that was shown
+        "priority": ai_priority,
+        "issue_type": ai_issue_type
     }
     action_value_str = json.dumps(action_value_payload)
 
@@ -178,7 +182,7 @@ def post_summary_and_final_ctas_for_mention(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "Based on your request, I've prepared the following ticket details."
+                "text": "It seems you wanted to create a ticket, I've prepared the following ticket details."
             }
         },
         {"type": "divider"}
@@ -245,7 +249,7 @@ def post_summary_and_final_ctas_for_mention(
                         "text": "✅ Looks Good, Create Ticket",
                         "emoji": True
                     },
-                    "action_id": "mention_confirm_open_create_form",
+                    "action_id": "create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action",
                     "value": action_value_str,
                     "style": "primary"
                 },

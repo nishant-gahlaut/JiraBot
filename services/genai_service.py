@@ -199,19 +199,24 @@ def generate_refined_description(user_description: str) -> str:
 
 def generate_ticket_components_from_thread(slack_thread_conversation: str) -> dict:
     """
-    Generates thread summary, suggested Jira title, and refined Jira description from a Slack thread
-    in a single LLM call, expecting a JSON output.
+    Generates thread summary, suggested Jira title, refined Jira description, priority, and issue_type
+    from a Slack thread in a single LLM call, expecting a JSON output.
     """
     if not slack_thread_conversation or slack_thread_conversation.isspace():
         logger.warning("Slack thread conversation is empty. Cannot generate ticket components.")
         return {
             "thread_summary": "Could not summarize: Empty thread input.",
             "suggested_title": "Could not generate title: Empty thread input.",
-            "refined_description": "Could not generate description: Empty thread input."
+            "refined_description": "Could not generate description: Empty thread input.",
+            "priority": "Medium-P2", # Default fallback
+            "issue_type": "Task"    # Default fallback
         }
 
+    # IMPORTANT: Ensure GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT in utils/prompts.py
+    # is updated to instruct the LLM to return "priority" and "issue_type"
+    # with the specified allowed values in its JSON output.
     prompt = GENERATE_TICKET_COMPONENTS_FROM_THREAD_PROMPT.format(slack_thread_conversation=slack_thread_conversation)
-    logger.info(f"Generating ticket components from thread: '{slack_thread_conversation[:200]}...'" )
+    logger.info(f"Generating ticket components (including priority/issue_type) from thread: '{slack_thread_conversation[:200]}...'")
     
     raw_llm_output = generate_text(prompt)
 
@@ -220,7 +225,9 @@ def generate_ticket_components_from_thread(slack_thread_conversation: str) -> di
         return {
             "thread_summary": f"Error during summarization: {raw_llm_output}",
             "suggested_title": f"Error during title generation: {raw_llm_output}",
-            "refined_description": f"Error during description generation: {raw_llm_output}"
+            "refined_description": f"Error during description generation: {raw_llm_output}",
+            "priority": "Medium-P2", # Default fallback
+            "issue_type": "Task"    # Default fallback
         }
     
     try:
@@ -237,32 +244,52 @@ def generate_ticket_components_from_thread(slack_thread_conversation: str) -> di
         logger.debug(f"Cleaned LLM output for JSON parsing: {cleaned_output}")
         components = json.loads(cleaned_output)
         
-        # Validate expected keys
-        if not all(key in components for key in ["thread_summary", "suggested_title", "refined_description"]):
+        # Validate expected keys, including new ones
+        required_keys = ["thread_summary", "suggested_title", "refined_description", "priority", "issue_type"]
+        if not all(key in components for key in required_keys):
             logger.error(f"LLM output parsed as JSON, but missing one or more required keys. Output: {components}")
             missing_keys_message = "LLM output was missing some components."
+            # Provide defaults for all fields if any are missing, to ensure a consistent return structure.
             return {
                 "thread_summary": components.get("thread_summary", missing_keys_message),
                 "suggested_title": components.get("suggested_title", missing_keys_message),
-                "refined_description": components.get("refined_description", missing_keys_message)
+                "refined_description": components.get("refined_description", missing_keys_message),
+                "priority": components.get("priority", "Medium-P2"), # Default fallback
+                "issue_type": components.get("issue_type", "Task")    # Default fallback
             }
         
-        logger.info("Successfully generated and parsed ticket components from thread.")
-        return components
+        # Optional: Validate priority and issue_type values against your allowed lists
+        allowed_priorities = ["Highest-P0", "High-P1", "Medium-P2", "Low-P3"]
+        allowed_issue_types = ["Bug", "Task", "Story", "Epic", "Other"]
+
+        if components.get("priority") not in allowed_priorities:
+            logger.warning(f"LLM returned an invalid priority: '{components.get('priority')}'. Defaulting to Medium-P2.")
+            components["priority"] = "Medium-P2"
         
+        if components.get("issue_type") not in allowed_issue_types:
+            logger.warning(f"LLM returned an invalid issue_type: '{components.get('issue_type')}'. Defaulting to Task.")
+            components["issue_type"] = "Task"
+
+        logger.info("Successfully generated and parsed ticket components (including priority/issue_type) from thread.")
+        return components # Return all components
+            
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to decode LLM output as JSON: {e}. Raw output: '{raw_llm_output[:500]}...'" )
+        logger.error(f"Failed to parse LLM output as JSON: {e}. Raw output: {raw_llm_output}")
         return {
-            "thread_summary": "Error: Could not parse AI summary output.",
-            "suggested_title": "Error: Could not parse AI title output.",
-            "refined_description": "Error: Could not parse AI description output. Raw LLM output was: " + raw_llm_output[:200] + "..."
+            "thread_summary": "Error: Could not parse AI summary.",
+            "suggested_title": "Error: Could not parse AI title.",
+            "refined_description": "Error: Could not parse AI description.",
+            "priority": "Medium-P2", # Default fallback
+            "issue_type": "Task"    # Default fallback
         }
     except Exception as e:
-        logger.error(f"An unexpected error occurred during ticket component generation: {e}", exc_info=True)
+        logger.error(f"Unexpected error processing LLM output: {e}", exc_info=True)
         return {
-            "thread_summary": f"Unexpected error: {e}",
-            "suggested_title": f"Unexpected error: {e}",
-            "refined_description": f"Unexpected error: {e}"
+            "thread_summary": "Error: Unexpected issue processing AI response.",
+            "suggested_title": "Error: Unexpected issue processing AI response.",
+            "refined_description": "Error: Unexpected issue processing AI response.",
+            "priority": "Medium-P2", # Default fallback
+            "issue_type": "Task"    # Default fallback
         }
 
 def generate_ticket_components_from_description(user_description: str) -> dict:
@@ -422,26 +449,47 @@ def process_mention_and_generate_all_components(user_direct_message_to_bot: str,
         parsed_json = json.loads(cleaned_output)
         
         # Validate expected keys
-        expected_keys = ["intent", "contextual_summary", "suggested_title", "refined_description"]
-        if not all(key in parsed_json for key in expected_keys):
-            logger.error(f"Missing one or more expected keys in parsed JSON (mention processing). Keys: {parsed_json.keys()}, Raw: {cleaned_output}")
-            # Allow partial data but log error, ensure all keys exist even if null
-            return {
-                "intent": parsed_json.get("intent"),
-                "contextual_summary": parsed_json.get("contextual_summary", "Error: Missing summary from AI response."),
-                "suggested_title": parsed_json.get("suggested_title"),
-                "refined_description": parsed_json.get("refined_description")
+        expected_keys = ["intent", "contextual_summary", "suggested_title", "refined_description", "priority", "issue_type", "direct_answer"]
+        # Ensure all keys are present, providing None if missing, and log if critical ones like intent/summary are absent.
+        # This makes the function more resilient to slight variations in LLM output if some non-critical fields are sometimes omitted.
+        
+        processed_components = {}
+        all_keys_present = True
+        for key in expected_keys:
+            if key not in parsed_json:
+                logger.warning(f"Key '{key}' missing from LLM response in mention processing. Defaulting to None. Raw: {cleaned_output}")
+                processed_components[key] = None
+                if key in ["intent", "contextual_summary"]:
+                    all_keys_present = False # Consider it a more significant issue if these are missing
+            else:
+                processed_components[key] = parsed_json[key]
+
+        if not all_keys_present:
+             logger.error(f"Critical key ('intent' or 'contextual_summary') missing in parsed JSON (mention processing). Keys: {parsed_json.keys()}, Raw: {cleaned_output}")
+             # Fallback for critical missing keys
+             return {
+                "intent": processed_components.get("intent"),
+                "contextual_summary": processed_components.get("contextual_summary", "Error: Missing critical summary from AI response."),
+                "suggested_title": processed_components.get("suggested_title"),
+                "refined_description": processed_components.get("refined_description"),
+                "priority": processed_components.get("priority"),
+                "issue_type": processed_components.get("issue_type"),
+                "direct_answer": processed_components.get("direct_answer")
             }
         
-        logger.info("Successfully processed mention and generated all components.")
-        return parsed_json
+        logger.info("Successfully processed mention and generated all components including priority and issue_type.")
+        return processed_components # Return the dictionary with all expected keys (some might be None)
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON from LLM (mention processing): {e}. Raw output: '{raw_llm_output[:500]}...'" )
         return {
             "intent": None,
-            "contextual_summary": "Error: Could not parse AI response for mention.",
+            "contextual_summary": f"Unexpected error: {e}",
             "suggested_title": None,
-            "refined_description": None
+            "refined_description": None,
+            "priority": None, 
+            "issue_type": None,
+            "direct_answer": None
         }
     except Exception as e:
         logger.error(f"Unexpected error during mention processing: {e}", exc_info=True)
@@ -449,7 +497,10 @@ def process_mention_and_generate_all_components(user_direct_message_to_bot: str,
             "intent": None,
             "contextual_summary": f"Unexpected error: {e}",
             "suggested_title": None,
-            "refined_description": None
+            "refined_description": None,
+            "priority": None, 
+            "issue_type": None,
+            "direct_answer": None
         }
 
 def generate_concise_problem_statement(summary: str, description: str, comments: str, max_lines: int = 7) -> str:

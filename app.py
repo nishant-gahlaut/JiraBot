@@ -903,9 +903,18 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
                 break
             cursor = result.get('response_metadata', {}).get('next_cursor')
         
+        continue_thread_info = {"channel_id": channel_id, "thread_ts": thread_parent_ts}
+        current_source = "check_similar_from_thread_flow" # Specific source for this flow
+
         if not all_thread_messages:
             logger.warning(f"No messages found in thread {thread_parent_ts} for similarity check.")
-            final_view_payload = build_similar_tickets_modal([]) # Show empty results modal
+            final_view_payload = build_similar_tickets_modal(
+                similar_tickets_details=[], 
+                channel_id=channel_id,
+                source=current_source,
+                add_continue_creation_button=True,
+                continue_creation_thread_info=continue_thread_info
+            )
             client.views_update(view_id=loading_view_id, view=final_view_payload)
             return
 
@@ -914,7 +923,13 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
         formatted_conversation = format_messages_for_summary(all_thread_messages, client)
         if not formatted_conversation:
             logger.warning(f"Formatted conversation is empty for thread {thread_parent_ts}.")
-            final_view_payload = build_similar_tickets_modal([])
+            final_view_payload = build_similar_tickets_modal(
+                similar_tickets_details=[],
+                channel_id=channel_id,
+                source=current_source,
+                add_continue_creation_button=True,
+                continue_creation_thread_info=continue_thread_info
+            )
             client.views_update(view_id=loading_view_id, view=final_view_payload)
             return
 
@@ -981,7 +996,14 @@ def _task_check_similar_from_thread_and_display(client, logger, loading_view_id,
             }
             similar_tickets_details_for_modal.append(transformed_ticket)
         
-        final_view_payload = build_similar_tickets_modal(similar_tickets_details_for_modal) # REVERTED: Removed thread_summary argument
+        final_view_payload = build_similar_tickets_modal(
+            similar_tickets_details_for_modal,
+            channel_id=channel_id, # For modal's own context
+            source=current_source,
+            original_ticket_key=None, # No original ticket context in this specific flow
+            add_continue_creation_button=True,
+            continue_creation_thread_info=continue_thread_info
+        )
         client.views_update(view_id=loading_view_id, view=final_view_payload)
         logger.info(f"Updated modal {loading_view_id} with {len(similar_tickets_details_for_modal)} similar tickets found for thread {thread_parent_ts}.")
 
@@ -1053,10 +1075,13 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
         ai_title = ticket_components.get("suggested_title")
         ai_description = ticket_components.get("refined_description")
         thread_summary = ticket_components.get("thread_summary") # Get the thread summary
+        ai_priority = ticket_components.get("priority") # <-- New
+        ai_issue_type = ticket_components.get("issue_type") # <-- New
 
         if not ai_title or ai_title.startswith("Error:") or not ai_description or ai_description.startswith("Error:"):
             error_message = "Sorry, I couldn't generate all ticket details from the thread."
-            detailed_error = f"AI generation failed. Title: '{ai_title}', Description: '{ai_description}'"
+            # Include new fields in error logging if needed
+            detailed_error = f"AI generation failed. Title: '{ai_title}', Description: '{ai_description}', Priority: '{ai_priority}', Issue Type: '{ai_issue_type}'"
             logger.error(detailed_error)
             final_error_view = build_loading_modal_view(f"{error_message}. Please try again. ({detailed_error[:100]})" )
             client.views_update(view_id=view_id, view=final_error_view)
@@ -1064,6 +1089,8 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
 
         logger.info(f"AI Suggested Title: {ai_title}")
         logger.info(f"AI Description: {ai_description[:200]}...")
+        logger.info(f"AI Predicted Priority: {ai_priority}") # <-- New log
+        logger.info(f"AI Predicted Issue Type: {ai_issue_type}") # <-- New log
         if thread_summary and not thread_summary.startswith("Error:"):
              logger.info(f"AI Thread Summary (for context/debugging): {thread_summary[:200]}...")
         else:
@@ -1085,6 +1112,8 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
         final_modal_view = build_create_ticket_modal(
             initial_summary=ai_title, 
             initial_description=ai_description,
+            initial_priority=ai_priority, # <-- New
+            initial_issue_type=ai_issue_type, # <-- New
             private_metadata=private_metadata_key_str 
         )
         
@@ -1114,6 +1143,238 @@ def handle_create_ticket_from_thread(ack, shortcut, client, logger, context):
                     client.chat_postEphemeral(channel=channel_id, user=user_id_invoked, thread_ts=original_message_ts, text=error_text)
             except Exception as e_ephemeral:
                 logger.error(f"Failed to send ephemeral error message: {e_ephemeral}")
+
+
+
+# --- Existing handler for Create Ticket from Thread --- (Now primarily for shortcut)
+@app.action("create_ticket_from_thread_from_shortcut_continue_create_ticket")
+def create_ticket_from_thread_from_shortcut_continue_create_ticket(ack, body, client, logger, context):
+    ack()  # Acknowledge shortcut immediately
+
+    trigger_id = body["trigger_id"]
+    user_id_invoked = body["user"]["id"]
+    
+    # This handler is now only for direct shortcut, so parse channel/message info directly
+    target_channel_id = body.get("channel", {}).get("id")
+    message_data = body.get("message", {})
+    original_message_ts_from_shortcut = message_data.get("ts")
+    target_thread_ts = message_data.get("thread_ts", original_message_ts_from_shortcut)
+    
+    view_id_to_process = None # Will be set after opening the new loading modal
+
+    logger.info(f"'Create Ticket from Thread' shortcut (via create_ticket_from_thread_from_shortcut_continue_create_ticket action): User {user_id_invoked} in channel {target_channel_id}, thread {target_thread_ts}.")
+
+    if not target_channel_id or not target_thread_ts:
+        logger.error("Shortcut: Critical error: target_channel_id or target_thread_ts could not be determined.")
+        try:
+            client.views_open(
+                trigger_id=trigger_id,
+                view=build_loading_modal_view("Error: Missing crucial information to locate the thread from shortcut. Please try again.")
+            )
+        except Exception as e_modal_open:
+            logger.error(f"Failed to open error modal for missing thread info (shortcut path): {e_modal_open}")
+        return
+    
+    try:
+        # Open a NEW loading modal for the shortcut flow
+        loading_view_response = client.views_open(
+            trigger_id=trigger_id,
+            view=build_loading_modal_view("🤖 Our AI is analyzing the thread and generating ticket details for you. This may take a few moments... ⏳")
+        )
+        view_id_to_process = loading_view_response["view"]["id"]
+        logger.info(f"Opened new loading modal with view_id: {view_id_to_process} for shortcut path.")
+        
+        logger.info(f"Processing thread: {target_channel_id}/{target_thread_ts} for user {user_id_invoked} on new view {view_id_to_process}")
+
+        all_thread_messages = []
+        cursor = None
+        while True:
+            result = client.conversations_replies(
+                channel=target_channel_id, # Use determined target_channel_id
+                ts=target_thread_ts,       # Use determined target_thread_ts
+                limit=200,
+                cursor=cursor
+            )
+            all_thread_messages.extend(result.get('messages', []))
+            if not result.get('has_more'):
+                break
+            cursor = result.get('response_metadata', {}).get('next_cursor')
+        
+        logger.info(f"Fetched {len(all_thread_messages)} messages from thread {target_thread_ts}.")
+
+        if not all_thread_messages:
+            logger.warning("No messages found in the thread.")
+            error_view = build_loading_modal_view("Could not find any messages in this thread to process.")
+            client.views_update(view_id=view_id_to_process, view=error_view)
+            return
+
+        formatted_conversation = format_messages_for_summary(all_thread_messages, client)
+        if not formatted_conversation:
+            logger.warning("Formatted conversation is empty.")
+            error_view = build_loading_modal_view("Could not format the conversation for summary.")
+            client.views_update(view_id=view_id_to_process, view=error_view)
+            return
+
+        logger.info(f"Generating ticket components from formatted conversation (first 200 chars): {formatted_conversation[:200]}...")
+        ticket_components = generate_ticket_components_from_thread(formatted_conversation)
+        
+        ai_title = ticket_components.get("suggested_title")
+        ai_description = ticket_components.get("refined_description")
+        thread_summary = ticket_components.get("thread_summary") # Get the thread summary
+        ai_priority = ticket_components.get("priority") # <-- New
+        ai_issue_type = ticket_components.get("issue_type") # <-- New
+
+        if not ai_title or ai_title.startswith("Error:") or not ai_description or ai_description.startswith("Error:"):
+            error_message = "Sorry, I couldn't generate all ticket details from the thread."
+            # Include new fields in error logging if needed
+            detailed_error = f"AI generation failed. Title: '{ai_title}', Description: '{ai_description}', Priority: '{ai_priority}', Issue Type: '{ai_issue_type}'"
+            logger.error(detailed_error)
+            final_error_view = build_loading_modal_view(f"{error_message}. Please try again. ({detailed_error[:100]})" )
+            client.views_update(view_id=view_id_to_process, view=final_error_view)
+            return
+
+        logger.info(f"AI Suggested Title: {ai_title}")
+        logger.info(f"AI Description: {ai_description[:200]}...")
+        logger.info(f"AI Predicted Priority: {ai_priority}") # <-- New log
+        logger.info(f"AI Predicted Issue Type: {ai_issue_type}") # <-- New log
+        if thread_summary and not thread_summary.startswith("Error:"):
+             logger.info(f"AI Thread Summary (for context/debugging): {thread_summary[:200]}...")
+             thread_summary_for_context = thread_summary # Store for private_metadata
+        else:
+             logger.warning(f"AI Thread Summary was not generated or had an error: {thread_summary}")
+             thread_summary_for_context = "" # Ensure it's an empty string if problematic
+
+        context_to_store = {
+            "channel_id": target_channel_id,    # Use determined target_channel_id
+            "thread_ts": target_thread_ts,      # Use determined target_thread_ts
+            "user_id": user_id_invoked,
+            "is_message_action": True, # Retain this, as it still pertains to a message thread context
+            "thread_summary": thread_summary_for_context 
+        }
+        private_metadata_key_str = json.dumps(context_to_store)
+
+        # conversation_states[private_metadata_key_str] = context_to_store # This line seems to store the context in conversation_states using the JSON string AS THE KEY. Ensure this is intended for retrieval in modal submission.
+        # Typically, private_metadata in the modal itself carries the context directly.
+
+        final_modal_view = build_create_ticket_modal(
+            initial_summary=ai_title, 
+            initial_description=ai_description,
+            initial_priority=ai_priority, # <-- New
+            initial_issue_type=ai_issue_type, # <-- New
+            private_metadata=private_metadata_key_str 
+        )
+        
+        client.views_update(view_id=view_id_to_process, view=final_modal_view)
+        logger.info(f"Updated modal {view_id_to_process} with Jira creation form for user {user_id_invoked} (shortcut path).")
+
+    except SlackApiError as e:
+        logger.error(f"Slack API error in shortcut flow (create_ticket_from_thread_from_shortcut_continue_create_ticket): {e.response['error']}", exc_info=True)
+        error_text = f"A Slack API error occurred: {e.response['error']}. Please try again."
+        if view_id_to_process:
+            try:
+                client.views_update(view_id=view_id_to_process, view=build_loading_modal_view(error_text))
+            except Exception as e_update:
+                 logger.error(f"Failed to update modal {view_id_to_process} with Slack API error (shortcut path): {e_update}")
+        elif trigger_id: # If view_id_to_process was not set, try to open a new error modal
+            try:
+                client.views_open(trigger_id=trigger_id, view=build_loading_modal_view(error_text))
+            except Exception as e_open_err:
+                logger.error(f"Failed to open new error modal for shortcut after SlackApiError: {e_open_err}")
+
+    except Exception as e:
+        logger.error(f"Unexpected error in shortcut flow (create_ticket_from_thread_from_shortcut_continue_create_ticket): {e}", exc_info=True)
+        error_text = "An unexpected error occurred while processing your request."
+        if view_id_to_process:
+            try:
+                client.views_update(view_id=view_id_to_process, view=build_loading_modal_view(error_text))
+            except Exception as e_update:
+                logger.error(f"Failed to update modal {view_id_to_process} with general error (shortcut path): {e_update}")
+        elif trigger_id: # Fallback for shortcut path
+            try:
+                client.views_open(trigger_id=trigger_id, view=build_loading_modal_view(error_text))
+            except SlackApiError as e_modal_open_final:
+                logger.error(f"Failed to open final error modal for shortcut: {e_modal_open_final}")
+                if target_channel_id and user_id_invoked:
+                    try:
+                        client.chat_postEphemeral(channel=target_channel_id, user=user_id_invoked, thread_ts=target_thread_ts, text=error_text)
+                    except Exception as e_ephemeral:
+                        logger.error(f"Failed to send ephemeral error message for shortcut: {e_ephemeral}")
+
+@app.action("create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action")
+def create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action(ack, body, client, logger, context):
+    ack()  # Acknowledge the button press immediately
+
+    trigger_id = body["trigger_id"]
+    user_id_who_clicked = body["user"]["id"]
+    action_details_str = body["actions"][0]["value"]
+
+    logger.info(f"'Looks Good, Create Ticket' button pressed by {user_id_who_clicked}. Action value: {action_details_str}")
+
+    try:
+        action_details = json.loads(action_details_str)
+        title = action_details.get("title")
+        description = action_details.get("description")
+        original_channel_id = action_details.get("channel_id")
+        original_thread_ts = action_details.get("thread_ts")
+        summary_for_confirmation = action_details.get("summary_for_confirmation") # This is the AI summary
+        ai_priority = action_details.get("priority") # NEW: Get priority from button value
+        ai_issue_type = action_details.get("issue_type") # NEW: Get issue_type from button value
+
+        if not title or not description:
+            logger.error("Missing title or description in action_details for 'Looks Good, Create Ticket' button.")
+            if original_channel_id and original_thread_ts: # Try to post ephemeral if context is available
+                client.chat_postEphemeral(
+                    channel=original_channel_id,
+                    user=user_id_who_clicked,
+                    thread_ts=original_thread_ts,
+                    text="Sorry, I couldn't retrieve the generated title or description to pre-fill the form. Please try again."
+                )
+            return
+
+        # Prepare private_metadata for the Jira creation modal
+        # This will be used by handle_modal_submission to know where to post confirmation
+        # and to get the thread_summary for the 'View Similar Tickets' button.
+        private_metadata_payload = {
+            "channel_id": original_channel_id,  # Channel for confirmation message post-ticket creation
+            "thread_ts": original_thread_ts,    # Thread for confirmation message
+            "user_id": user_id_who_clicked,     # User who initiated
+            "flow_origin": "bot_looks_good_create", # Identifier for this flow
+            "thread_summary": summary_for_confirmation, # CRITICAL: This is the AI summary for 'View Similar Tickets'
+            "ai_priority": ai_priority, # NEW: Pass to modal builder
+            "ai_issue_type": ai_issue_type, # NEW: Pass to modal builder
+            # "original_ticket_key" will be added by handle_modal_submission after ticket is created
+        }
+        private_metadata_str = json.dumps(private_metadata_payload)
+        
+        # Store in conversation_states if your handle_modal_submission relies on it.
+        # However, directly passing it via private_metadata in the modal is more common.
+        # For now, let's assume handle_modal_submission primarily uses the modal's private_metadata.
+        # conversation_states[private_metadata_str] = private_metadata_payload 
+        # logger.info(f"Stored modal context for 'bot_looks_good_create' in conversation_states with key: {private_metadata_str}")
+
+        modal_view = build_create_ticket_modal(
+            initial_summary=title,
+            initial_description=description,
+            initial_priority=ai_priority, # NEW: Pass to modal builder
+            initial_issue_type=ai_issue_type, # NEW: Pass to modal builder
+            private_metadata=private_metadata_str
+        )
+
+        client.views_open(trigger_id=trigger_id, view=modal_view)
+        logger.info(f"Opened Jira creation modal for user {user_id_who_clicked} (from 'Looks Good' button) with pre-filled AI content.")
+
+    except json.JSONDecodeError as e_json:
+        logger.error(f"Failed to parse action_details JSON for 'Looks Good, Create Ticket' button: {e_json}. Value: {action_details_str}")
+        if body.get("channel",{}).get("id") and body.get("message",{}).get("thread_ts") :
+            client.chat_postEphemeral(channel=body["channel"]["id"], user=user_id_who_clicked, thread_ts=body["message"]["thread_ts"], text="Error processing your request due to invalid data.")
+    except SlackApiError as e_slack:
+        logger.error(f"Slack API error in 'Looks Good, Create Ticket' button action: {e_slack.response['error']}", exc_info=True)
+        if body.get("channel",{}).get("id") and body.get("message",{}).get("thread_ts"):
+            client.chat_postEphemeral(channel=body["channel"]["id"], user=user_id_who_clicked, thread_ts=body["message"]["thread_ts"], text=f"A Slack API error occurred: {e_slack.response['error']}")
+    except Exception as e:
+        logger.error(f"Unexpected error in 'Looks Good, Create Ticket' button action: {e}", exc_info=True)
+        if body.get("channel",{}).get("id") and body.get("message",{}).get("thread_ts"):
+            client.chat_postEphemeral(channel=body["channel"]["id"], user=user_id_who_clicked, thread_ts=body["message"]["thread_ts"], text="An unexpected error occurred.")
 
 
 # --- Helper for background task ---
@@ -1243,142 +1504,245 @@ def handle_view_similar_tickets_action(ack, body, client, logger):
 
 @app.view("similar_tickets_modal")
 def handle_similar_tickets_submission(ack, body, client, logger):
-    """Handles the submission of the similar tickets modal (e.g., when 'Link Selected Tickets' is clicked)."""
+    """Handles the submission of the similar tickets modal (e.g., when 'Link Selected Tickets' or 'Continue Create Ticket' is clicked)."""
     
     view = body.get("view", {})
     private_metadata_str = view.get("private_metadata", "{}")
     user_id = body.get("user", {}).get("id")
-    # view_id_to_update = view.get("id") # Not strictly needed if acking with update
+    current_view_id = view.get("id")
+    trigger_id = body.get("trigger_id") # Useful for opening new views in error scenarios
 
     try:
         private_metadata = json.loads(private_metadata_str)
-        original_ticket_key = private_metadata.get("original_ticket_key")
-        source_channel_id = private_metadata.get("channel_id") 
-        source_thread_ts = private_metadata.get("thread_ts")
+        submit_action = private_metadata.get("submit_action")
+        source_channel_id = private_metadata.get("channel_id") # Channel where the modal was invoked or relevant context
 
-        if not original_ticket_key:
-            logger.error("Original ticket key not found in private metadata for linking.")
-            error_view = {
-                "type": "modal", "title": {"type": "plain_text", "text": "Error"},
-                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: Critical information (original ticket key) was missing. Cannot link tickets."}}],
-                "close": {"type": "plain_text", "text": "Close"}
+        if submit_action == "continue_creation":
+            logger.info(f"User {user_id} submitted similar_tickets_modal for 'continue_creation' from view {current_view_id}.")
+            original_thread_channel_id = private_metadata.get("original_thread_channel_id")
+            original_thread_ts = private_metadata.get("original_thread_ts")
+
+            if not original_thread_channel_id or not original_thread_ts:
+                logger.error(f"Missing original_thread_channel_id or original_thread_ts in private_metadata for continue_creation. View: {current_view_id}")
+                error_view = build_loading_modal_view("Error: Essential thread information missing. Cannot continue ticket creation.")
+                ack({"response_action": "update", "view": error_view})
+                return
+
+            # Acknowledge by updating to a loading view
+            loading_view_payload = build_loading_modal_view("🤖 Our AI is analyzing the thread and generating ticket details... ⏳")
+            ack({"response_action": "update", "view": loading_view_payload})
+            logger.info(f"Updated modal {current_view_id} to loading state for 'continue_creation'.")
+
+            # --- Begin: Ported logic from create_ticket_from_thread_from_shortcut_continue_create_ticket --- 
+            all_thread_messages = []
+            cursor = None
+            while True:
+                replies_result = client.conversations_replies(
+                    channel=original_thread_channel_id,
+                    ts=original_thread_ts,
+                    limit=200,
+                    cursor=cursor
+                )
+                all_thread_messages.extend(replies_result.get('messages', []))
+                if not replies_result.get('has_more'):
+                    break
+                cursor = replies_result.get('response_metadata', {}).get('next_cursor')
+            
+            logger.info(f"Fetched {len(all_thread_messages)} messages from thread {original_thread_ts} for view {current_view_id}.")
+
+            if not all_thread_messages:
+                logger.warning(f"No messages found in the thread for continue_creation. View: {current_view_id}")
+                error_view = build_loading_modal_view("Could not find any messages in this thread to process.")
+                client.views_update(view_id=current_view_id, view=error_view)
+                return
+
+            formatted_conversation = format_messages_for_summary(all_thread_messages, client)
+            if not formatted_conversation:
+                logger.warning(f"Formatted conversation is empty for continue_creation. View: {current_view_id}")
+                error_view = build_loading_modal_view("Could not format the conversation for summary.")
+                client.views_update(view_id=current_view_id, view=error_view)
+                return
+
+            logger.info(f"Generating ticket components from formatted conversation (first 200 chars): {formatted_conversation[:200]} for view {current_view_id}")
+            ticket_components = generate_ticket_components_from_thread(formatted_conversation)
+            
+            ai_title = ticket_components.get("suggested_title")
+            ai_description = ticket_components.get("refined_description")
+            thread_summary_for_context = ticket_components.get("thread_summary", "")
+            ai_priority = ticket_components.get("priority")
+            ai_issue_type = ticket_components.get("issue_type")
+
+            if not ai_title or ai_title.startswith("Error:") or not ai_description or ai_description.startswith("Error:"):
+                error_message = "Sorry, I couldn't generate all ticket details from the thread."
+                detailed_error = f"AI generation failed. Title: '{ai_title}', Description: '{ai_description}', Priority: '{ai_priority}', Issue Type: '{ai_issue_type}'"
+                logger.error(f"{detailed_error} for view {current_view_id}")
+                final_error_view = build_loading_modal_view(f"{error_message}. Please try again. ({detailed_error[:100]})" )
+                client.views_update(view_id=current_view_id, view=final_error_view)
+                return
+            
+            logger.info(f"AI Suggested Title: {ai_title} for view {current_view_id}")
+
+            context_to_store_for_jira_modal = {
+                "channel_id": original_thread_channel_id, 
+                "thread_ts": original_thread_ts, 
+                "user_id": user_id,
+                "is_message_action": True, # Or a more specific flag if needed
+                "thread_summary": thread_summary_for_context
             }
-            ack({"response_action": "update", "view": error_view})
-            return
+            jira_modal_private_metadata_str = json.dumps(context_to_store_for_jira_modal)
 
-        selected_ticket_keys = []
-        state_values = view.get("state", {}).get("values", {})
-        logger.debug(f"View state values for linking from similar_tickets_modal: {json.dumps(state_values, indent=2)}")
+            final_jira_modal_view = build_create_ticket_modal(
+                initial_summary=ai_title, 
+                initial_description=ai_description,
+                initial_priority=ai_priority,
+                initial_issue_type=ai_issue_type,
+                private_metadata=jira_modal_private_metadata_str 
+            )
+            
+            client.views_update(view_id=current_view_id, view=final_jira_modal_view)
+            logger.info(f"Updated modal {current_view_id} with Jira creation form after 'continue_creation' submit.")
+            # --- End: Ported logic --- 
 
-        for block_id, block_content in state_values.items():
-            if block_id.startswith("input_link_ticket_"):
-                checkbox_action_id_key = list(block_content.keys())[0]
-                if checkbox_action_id_key.startswith("checkbox_action_"):
-                    selected_options = block_content[checkbox_action_id_key].get("selected_options", [])
-                    if selected_options:
-                        for option in selected_options:
-                            selected_ticket_keys.append(option["value"])
-        
-        logger.info(f"User {user_id} submitted similar_tickets_modal to link: {selected_ticket_keys} to original ticket: {original_ticket_key}")
+        elif submit_action == "link_tickets":
+            logger.info(f"User {user_id} submitted similar_tickets_modal for 'link_tickets' from view {current_view_id}.")
+            original_ticket_key = private_metadata.get("original_ticket_key")
+            # The channel_id for linking confirmation messages is source_channel_id (modal's context)
+            # thread_ts for linking confirmation is not directly available in private_metadata in this exact form for linking, but might not be needed if modal updates are sufficient.
 
-        if not selected_ticket_keys:
-            logger.info("No tickets were selected to link via similar_tickets_modal.")
-            error_view = {
-                "type": "modal", "title": {"type": "plain_text", "text": "Error"},
-                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: No tickets were selected. Please select at least one ticket to link."}}],
-                "close": {"type": "plain_text", "text": "Close"}
-            }
-            ack({"response_action": "update", "view": error_view})
-            return
-        
-        # REMOVED early ack() here. All ack() calls will now include a response_action.
+            if not original_ticket_key:
+                logger.error("Original ticket key not found in private metadata for linking.")
+                error_view = {
+                    "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: Critical information (original ticket key) was missing. Cannot link tickets."}}],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+                ack({"response_action": "update", "view": error_view})
+                return
 
-        original_ticket = get_jira_ticket(original_ticket_key)
-        if not original_ticket:
-            logger.error(f"Could not fetch original ticket {original_ticket_key} for linking (from view submission).")
-            error_view = {
-                "type": "modal", "title": {"type": "plain_text", "text": "Error"},
-                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: Sorry, I couldn't retrieve the details of the original ticket {original_ticket_key} to link to."}}],
-                "close": {"type": "plain_text", "text": "Close"}
-            }
-            ack({"response_action": "update", "view": error_view})
-            return
+            selected_ticket_keys = []
+            state_values = view.get("state", {}).get("values", {})
+            logger.debug(f"View state values for linking from similar_tickets_modal: {json.dumps(state_values, indent=2)}")
 
-        current_description = original_ticket.get("description", "")
-        linked_section_header = "\n\n---\n*Linked Tickets:*"
-        links_to_add_str = ""
-        newly_linked_count = 0
-        for ticket_key_to_link in selected_ticket_keys:
-            link_line = f"\n• {ticket_key_to_link}"
-            if not (linked_section_header in current_description and link_line in current_description):
-                links_to_add_str += link_line
-                newly_linked_count += 1
+            for block_id, block_content in state_values.items():
+                if block_id.startswith("input_link_ticket_"):
+                    checkbox_action_id_key = list(block_content.keys())[0]
+                    if checkbox_action_id_key.startswith("checkbox_action_"):
+                        selected_options = block_content[checkbox_action_id_key].get("selected_options", [])
+                        if selected_options:
+                            for option in selected_options:
+                                selected_ticket_keys.append(option["value"])
+            
+            logger.info(f"User {user_id} submitted similar_tickets_modal to link: {selected_ticket_keys} to original ticket: {original_ticket_key}")
 
-        if newly_linked_count == 0:
-            logger.info(f"All selected tickets {selected_ticket_keys} already appear to be linked to {original_ticket_key} (from view submission).")
-            already_linked_view = {
-                "type": "modal", "title": {"type": "plain_text", "text": "Already Linked"},
-                "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"It looks like the selected tickets are already linked to <{original_ticket.get('url')}|{original_ticket_key}>."}}],
-                "close": {"type": "plain_text", "text": "Close"}
-            }
-            ack({"response_action": "update", "view": already_linked_view})
-            return
+            if not selected_ticket_keys:
+                logger.info("No tickets were selected to link via similar_tickets_modal.")
+                error_view = {
+                    "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: No tickets were selected. Please select at least one ticket to link."}}],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+                ack({"response_action": "update", "view": error_view})
+                return
+            
+            # REMOVED early ack() here. All ack() calls will now include a response_action.
 
-        updated_description = current_description
-        if linked_section_header not in updated_description:
-            updated_description += linked_section_header
-        updated_description += links_to_add_str
-        updated_description += "\n"
+            original_ticket = get_jira_ticket(original_ticket_key)
+            if not original_ticket:
+                logger.error(f"Could not fetch original ticket {original_ticket_key} for linking (from view submission).")
+                error_view = {
+                    "type": "modal", "title": {"type": "plain_text", "text": "Error"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f":warning: Sorry, I couldn't retrieve the details of the original ticket {original_ticket_key} to link to."}}],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+                ack({"response_action": "update", "view": error_view})
+                return
 
-        update_payload = {"key": original_ticket_key, "description": updated_description}
-        update_success = update_jira_ticket(update_payload)
-        
-        if update_success:
-            logger.info(f"Jira ticket link update successful for {original_ticket_key}. Updating modal with success.")
-            success_linking_modal_view = {
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "✅ Link Successful"},
-                "blocks": [{
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"Successfully linked {newly_linked_count} ticket(s) to <{original_ticket.get('url')}|{original_ticket_key}>!"}
-                }],
-                "close": {"type": "plain_text", "text": "Close"}
-            }
-            ack({"response_action": "update", "view": success_linking_modal_view})
-        else: # Jira update failed
-            logger.error(f"Jira ticket update for linking returned False for {original_ticket_key} (view submission). Updating modal with error.")
-            error_linking_modal_view = {
-                "type": "modal",
-                "title": {"type": "plain_text", "text": "⚠️ Link Failed"},
-                "blocks": [{
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"Sorry, there was an issue linking the tickets to <{original_ticket.get('url')}|{original_ticket_key}>. The Jira update failed."}
-                }],
-                "close": {"type": "plain_text", "text": "Close"}
-            }
-            ack({"response_action": "update", "view": error_linking_modal_view})
+            current_description = original_ticket.get("description", "")
+            linked_section_header = "\n\n---\n*Linked Tickets:*"
+            links_to_add_str = ""
+            newly_linked_count = 0
+            for ticket_key_to_link in selected_ticket_keys:
+                link_line = f"\n• {ticket_key_to_link}"
+                if not (linked_section_header in current_description and link_line in current_description):
+                    links_to_add_str += link_line
+                    newly_linked_count += 1
+
+            if newly_linked_count == 0:
+                logger.info(f"All selected tickets {selected_ticket_keys} already appear to be linked to {original_ticket_key} (from view submission).")
+                already_linked_view = {
+                    "type": "modal", "title": {"type": "plain_text", "text": "Already Linked"},
+                    "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": f"It looks like the selected tickets are already linked to <{original_ticket.get('url')}|{original_ticket_key}>."}}],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+                ack({"response_action": "update", "view": already_linked_view})
+                return
+
+            updated_description = current_description
+            if linked_section_header not in updated_description:
+                updated_description += linked_section_header
+            updated_description += links_to_add_str
+            updated_description += "\n"
+
+            update_payload = {"key": original_ticket_key, "description": updated_description}
+            update_success = update_jira_ticket(update_payload)
+            
+            if update_success:
+                logger.info(f"Jira ticket link update successful for {original_ticket_key}. Updating modal with success.")
+                success_linking_modal_view = {
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "✅ Link Successful"},
+                    "blocks": [{
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"Successfully linked {newly_linked_count} ticket(s) to <{original_ticket.get('url')}|{original_ticket_key}>!"}
+                    }],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+                ack({"response_action": "update", "view": success_linking_modal_view})
+            else: # Jira update failed
+                logger.error(f"Jira ticket update for linking returned False for {original_ticket_key} (view submission). Updating modal with error.")
+                error_linking_modal_view = {
+                    "type": "modal",
+                    "title": {"type": "plain_text", "text": "⚠️ Link Failed"},
+                    "blocks": [{
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"Sorry, there was an issue linking the tickets to <{original_ticket.get('url')}|{original_ticket_key}>. The Jira update failed."}
+                    }],
+                    "close": {"type": "plain_text", "text": "Close"}
+                }
+                ack({"response_action": "update", "view": error_linking_modal_view})
+
+        else: # Unknown submit_action or no action
+            logger.warning(f"Unknown or missing submit_action in similar_tickets_modal. Action: '{submit_action}'. View ID: {current_view_id}")
+            ack() # Simple acknowledgment if the action is unclear
+
+    except SlackApiError as e_slack:
+        logger.error(f"Slack API error in handle_similar_tickets_submission (view: {current_view_id}): {e_slack.response['error']}", exc_info=True)
+        error_text = f"A Slack API error occurred: {e_slack.response['error']}."
+        # Try to update the current modal if it exists and an ack hasn't been sent with an update already.
+        # This is a best-effort as ack() might have already been called or the view might be closed.
+        if current_view_id: # Check if current_view_id is available
+            try:
+                # Check if ack has already been called with a response_action. This is hard to check directly.
+                # For safety, we might only call client.views_update if we are sure ack wasn't for an update.
+                # However, if an error occurs before any ack, updating is fine.
+                # If an error occurs after ack(update), this client.views_update might fail or be ignored.
+                # Let's assume if we reach here, we want to try to show an error on the current modal.
+                client.views_update(view_id=current_view_id, view=build_loading_modal_view(error_text + " Please try again."))
+            except Exception as e_update:
+                logger.error(f"Failed to update modal {current_view_id} with Slack API error message: {e_update}")
+        # If no current_view_id or update fails, not much else can be done for this interaction.
 
     except Exception as e:
-        logger.error(f"Error in handle_similar_tickets_submission: {e}", exc_info=True)
-        # Generic error, update modal to show a generic error message
-        generic_error_view = {
-            "type": "modal", "title": {"type": "plain_text", "text": "Error"},
-            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": ":warning: An unexpected error occurred while processing your request. Please try again."}}],
-            "close": {"type": "plain_text", "text": "Close"}
-        }
-        # Try to ack with an update, but if ack has already been called for this interaction (e.g. by a more specific error path),
-        # this might not work as intended or could error. However, view submissions should only be ack'd once.
-        try:
-            ack({"response_action": "update", "view": generic_error_view})
-        except Exception as ack_e: # Catching potential error if ack is called multiple times
-            logger.error(f"Failed to ack with generic error view, possibly ack already called: {ack_e}")
-            # Fallback: If acking with update fails, try to post an ephemeral message if possible.
-            # This is a last resort if the modal cannot be updated.
-            if source_channel_id and user_id:
-                 try:
-                    client.chat_postEphemeral(channel=source_channel_id, user=user_id, thread_ts=source_thread_ts, text="Sorry, an unexpected error occurred, and I couldn't update the dialog. Please try again.")
-                 except Exception as eph_e:
-                     logger.error(f"Failed to send fallback ephemeral message: {eph_e}")
+        logger.error(f"Error in handle_similar_tickets_submission (view: {current_view_id}): {e}", exc_info=True)
+        # Generic error, update modal to show a generic error message if possible
+        if current_view_id:
+            try:
+                generic_error_view = build_loading_modal_view(message=":warning: An unexpected error occurred. Please try again.")
+                client.views_update(view_id=current_view_id, view=generic_error_view)
+            except Exception as e_update_generic:
+                logger.error(f"Failed to update modal {current_view_id} with generic error message: {e_update_generic}")
+        # If ack was already used for an update, this might fail. A simple ack() might be the only option if not already called.
+        # However, Slack expects only one ack per interaction. If an error happens after an ack(update), the modal might already be gone or changed.
 
 
 # --- Start the App ---

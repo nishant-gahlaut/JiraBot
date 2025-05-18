@@ -1,21 +1,42 @@
 import logging
 from utils.slack_ui_helpers import build_rich_ticket_blocks # Import the helper
 import json
+from slack_sdk.errors import SlackApiError # Ensure this is imported if not already
 
 logger = logging.getLogger(__name__)
 
+MAX_MODAL_TITLE_LENGTH = 24
+MAX_BLOCKS_FALLBACK_MSG = "_... remaining tickets truncated due to display limits._"
+
+# Placeholder for build_rich_ticket_blocks if it's in another file or needs to be defined
+# def build_rich_ticket_blocks(ticket_data, source, original_ticket_key):
+# return [{"type": "section", "text": {"type": "mrkdwn", "text": f"Ticket: {ticket_data.get('ticket_key')}"}}]
+
 # --- NEW MODAL BUILDER --- 
-def build_similar_tickets_modal(similar_tickets_details: list, channel_id: str = None, source: str = "unknown", original_ticket_key: str = None):
+def build_similar_tickets_modal(
+    similar_tickets_details: list, 
+    channel_id: str = None, 
+    source: str = "unknown", 
+    original_ticket_key: str = None,
+    add_continue_creation_button: bool = False,
+    continue_creation_thread_info: dict = None
+):
     """Builds the modal view to display a list of similar tickets."""
     modal_blocks = []
     modal_title = "Similar Tickets" # Default short title
-    private_metadata_payload = {"source": source, "channel_id": channel_id} # Initialize with source and channel_id
+    
+    # Initialize private_metadata_payload with common fields
+    private_metadata_payload = {
+        "source": source, 
+        "channel_id": channel_id, # Channel_id of the modal's display context if any
+    }
     if original_ticket_key:
         private_metadata_payload["original_ticket_key"] = original_ticket_key
-    # It's also crucial to pass channel_id and thread_ts if the link_selected_tickets action needs to post messages.
-    # Assuming they might come from the original context that triggered "View Similar Tickets"
-    # For now, these are not explicitly passed to build_similar_tickets_modal, so they won't be in private_metadata unless added.
-    # If they were part of the button_value that triggered this modal, that's another path.
+
+    # If continue_creation_thread_info is provided, embed it directly into private_metadata
+    if continue_creation_thread_info:
+        private_metadata_payload["original_thread_channel_id"] = continue_creation_thread_info.get("channel_id")
+        private_metadata_payload["original_thread_ts"] = continue_creation_thread_info.get("thread_ts")
 
     if not similar_tickets_details:
         modal_blocks.append({
@@ -200,7 +221,7 @@ def build_similar_tickets_modal(similar_tickets_details: list, channel_id: str =
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": "_... remaining tickets truncated due to display limits._"
+                    "text": MAX_BLOCKS_FALLBACK_MSG
                 }
             ]
         }]
@@ -223,13 +244,25 @@ def build_similar_tickets_modal(similar_tickets_details: list, channel_id: str =
         "blocks": modal_blocks
     }
 
-    # Conditionally add the submit button if input blocks are present
-    if source == "view_similar_tickets_action":
+    # Conditionally set the submit button based on the context
+    if add_continue_creation_button and private_metadata_payload.get("original_thread_channel_id") and private_metadata_payload.get("original_thread_ts"):
         view["submit"] = {
             "type": "plain_text",
-            "text": "Link Selected Tickets", # This will be the main action button
+            "text": "Continue Create Ticket",
             "emoji": True
         }
+        private_metadata_payload["submit_action"] = "continue_creation"
+    elif source == "view_similar_tickets_action": # This is for linking tickets
+        view["submit"] = {
+            "type": "plain_text",
+            "text": "Link Selected Tickets",
+            "emoji": True
+        }
+        private_metadata_payload["submit_action"] = "link_tickets"
+    # If neither, the modal will only have a "Cancel" (close) button.
+
+    # Update private_metadata with any changes (like submit_action)
+    view["private_metadata"] = json.dumps(private_metadata_payload)
 
     return view
 
