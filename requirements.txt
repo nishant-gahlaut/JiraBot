@@ -1,8 +1,11 @@
 slack_bolt
+torch
+transformers
+joblib
 python-dotenv
 google-generativeai
 jira
-requests 
+requests
 langchain
 pinecone==6.0.2
 langchain-cohere
