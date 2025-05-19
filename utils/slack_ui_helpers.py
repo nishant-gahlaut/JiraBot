@@ -79,9 +79,9 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, or
     summary = ticket_data.get('summary', 'No summary available')
     status = ticket_data.get('status', 'N/A')
     priority = ticket_data.get('priority', 'N/A')
-    assignee = ticket_data.get('assignee', 'Unassigned')
+    assignee = ticket_data.get('assignee', 'Unassigned') # Raw value, could be 'nan' or None
     issue_type = ticket_data.get('issue_type', 'N/A')
-    owned_by_team = ticket_data.get('owned_by_team', 'N/A')
+    owned_by_team = ticket_data.get('owned_by_team', 'N/A') # Raw value, could be 'nan' or None
     description = ticket_data.get('description', '') # Get description
     resolution = ticket_data.get('resolution', '')   # Get resolution
 
@@ -106,16 +106,25 @@ def build_rich_ticket_blocks(ticket_data: dict, action_elements: list = None, or
     details_elements = []
     if status and status != 'N/A':
         details_elements.append(f"📉 *Status:* {status}")
-    if assignee and assignee != 'Unassigned':
-        details_elements.append(f"👤 *Assignee:* {assignee}")
+
+    # Updated Assignee display logic
+    assignee_display_text = "Not Assigned"
+    assignee_val_str_lower = str(assignee).strip().lower() # assignee is from ticket_data.get('assignee', 'Unassigned')
+    # Check for common empty/placeholder strings or if it contains ': nan'
+    if assignee and assignee_val_str_lower not in ['unassigned', 'nan', 'none', ''] and ': nan' not in assignee_val_str_lower:
+        assignee_display_text = assignee # Use original value
+    details_elements.append(f"👤 *Assignee:* {assignee_display_text}")
+
     if priority and priority != 'N/A':
         details_elements.append(f"{priority_emoji} *Priority:* {priority}")
     
-    # DEBUG log for owned_by_team value inside the helper
-    logger.info(f"DEBUG UI HELPER: ticket_key={ticket_key}, owned_by_team='{owned_by_team}', type={type(owned_by_team)}, not_NA={owned_by_team != 'N/A'}")
-
-    if owned_by_team and owned_by_team != 'N/A':
-        details_elements.append(f"👥 *Team:* {owned_by_team}")
+    # Updated Team display logic
+    team_display_text = "Not Specified"
+    team_val_str_lower = str(owned_by_team).strip().lower() # owned_by_team is from ticket_data.get('owned_by_team', 'N/A')
+    # Check for common empty/placeholder strings or if it contains ': nan'
+    if owned_by_team and team_val_str_lower not in ['n/a', 'nan', 'none', ''] and ': nan' not in team_val_str_lower:
+        team_display_text = owned_by_team # Use original value
+    details_elements.append(f"👥 *Team:* {team_display_text}")
     
     if details_elements:
         details_text = "    ".join(details_elements) # Join with multiple spaces for separation
