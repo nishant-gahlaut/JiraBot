@@ -42,14 +42,23 @@ def present_duplicate_check_and_options(client, channel_id: str, thread_ts: str,
         overall_similarity_summary = duplicate_results.get("summary", "Could not generate an overall summary for similar tickets.")
         logger.info(f"Thread {thread_ts}: Orchestrator - Duplicate detection found {len(top_tickets)} potential matches.")
 
+        # Process title and description before adding to button context
+        processed_title = ai_suggested_title
+        if not ai_suggested_title or str(ai_suggested_title).strip().lower() == 'none':
+            processed_title = None
+
+        processed_description = ai_refined_description
+        if not ai_refined_description:
+            processed_description = initial_description
+
         button_context_value = {
             "initial_description": initial_description,
             "thread_ts": str(thread_ts),
             "channel_id": str(channel_id),
             "user_id": str(user_id),
             "assistant_id": str(assistant_id) if assistant_id else None,
-            "title": ai_suggested_title,
-            "description": ai_refined_description,
+            "title": processed_title,
+            "description": processed_description,
             "priority": ai_priority,
             "issue_type": ai_issue_type,
             "summary_for_confirmation": initial_description

@@ -162,6 +162,7 @@ def build_create_ticket_modal(initial_summary="", initial_description="", privat
                     "placeholder": {"type": "plain_text", "text": "Select brand(s)"},
                     "options": [
                         {"text": {"type": "plain_text", "text": "TATA"}, "value": "TATA"},
+                        {"text": {"type": "plain_text", "text": "Org"}, "value": "Org"},
                         {"text": {"type": "plain_text", "text": "Shell malasia"}, "value": "shell_malasia"},
                         {"text": {"type": "plain_text", "text": "Domino"}, "value": "domino"},
                         {"text": {"type": "plain_text", "text": "Hertz"}, "value": "hertz"}

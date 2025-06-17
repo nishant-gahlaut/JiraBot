@@ -164,18 +164,36 @@ def post_summary_and_final_ctas_for_mention(
     """
     logger.info(f"Posting final CTAs for processed mention. User: {user_id}, Channel: {channel_id}, Thread: {thread_ts}. Context key: {mention_context_key_for_cta}")
 
+    # DEBUG Logging: Values before action_value_payload creation
+    logger.info(f"DEBUG common_handler_utils: Values before action_value_payload creation:")
+    logger.info(f"DEBUG common_handler_utils: ai_suggested_title = '{ai_suggested_title}' (type: {type(ai_suggested_title)})")
+    logger.info(f"DEBUG common_handler_utils: ai_refined_description = '{ai_refined_description}' (type: {type(ai_refined_description)})")
+    logger.info(f"DEBUG common_handler_utils: summary_to_display = '{summary_to_display}' (type: {type(summary_to_display)})")
+
+    # Ensure robust fallbacks to non-empty strings if primary values are falsy
+    final_title = ai_suggested_title if ai_suggested_title else "Untitled Ticket"
+    final_description = ai_refined_description if ai_refined_description else (summary_to_display if summary_to_display else "No description available.")
+    final_summary_for_confirmation = summary_to_display if summary_to_display else "No summary available."
+    # For priority and issue_type, ensure they are at least None if falsy, or a string if they have value
+    # This is to prevent issues with json.dumps if they are empty strings meant to be null,
+    # or to ensure they are consistently typed if GenAI returns varied falsy values.
+    # However, if Jira service expects None for optional fields, passing empty string might be wrong.
+    # For now, let GenAI service handle their type, and assume they are str | None as per type hint.
+    # If they are empty strings from GenAI and should be None, that logic is in GenAI service or just before calling this.
+
     action_value_payload = {
         "mention_context_key": mention_context_key_for_cta, # Main key to retrieve full context
-        "title": ai_suggested_title if ai_suggested_title else "Untitled Ticket",
-        "description": ai_refined_description if ai_refined_description else summary_to_display,
+        "title": final_title,
+        "description": final_description,
         "user_id": user_id,
         "channel_id": channel_id,
         "thread_ts": thread_ts,
-        "summary_for_confirmation": summary_to_display, # The specific summary that was shown
-        "priority": ai_priority,
+        "summary_for_confirmation": final_summary_for_confirmation, # The specific summary that was shown
+        "priority": ai_priority, # Assuming these are correctly None or have a string value
         "issue_type": ai_issue_type
     }
     action_value_str = json.dumps(action_value_payload)
+    logger.info(f"DEBUG common_handler_utils: Constructed action_value_payload: {action_value_payload}")
 
     blocks = [
         {

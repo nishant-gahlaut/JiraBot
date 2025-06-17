@@ -49,37 +49,12 @@ def process_user_query(
     reply_ts = thread_ts if thread_ts else message_ts
 
     # --- 1. Fetch Thread Context (if applicable) ---
+    # We are disabling thread history fetching to ensure consistent AI behavior.
     formatted_conversation_history = ""
-    if thread_ts: # Indicates the user's message is part of an existing thread
-        logger.info(f"Query is in thread {thread_ts}. Fetching entire thread content for channel {channel_id} as context.")
-        try:
-            # Fetch all messages in this specific thread
-            result = client.conversations_replies(
-                channel=channel_id,
-                ts=thread_ts, # Parent message TS of the thread
-                limit=MAX_MESSAGES_TO_FETCH_HISTORY, # Max messages to consider from the thread
-                inclusive=True
-            )
-            thread_messages = result.get('messages', [])
-            if thread_messages:
-                # Format these messages, excluding bot's own messages
-                # format_messages_for_mention_processing is used as it handles user mapping and bot message exclusion
-                formatted_conversation_history = format_messages_for_mention_processing(
-                    thread_messages, 
-                    client, 
-                    bot_user_id, 
-                    MAX_MESSAGES_TO_FETCH_HISTORY 
-                )
-                logger.debug(f"Fetched and formatted {len(thread_messages)} messages from thread {thread_ts} for AI context.")
-            else:
-                logger.debug(f"No messages found in thread {thread_ts} for AI context.")
-        except SlackApiError as e:
-            logger.error(f"Slack API error fetching thread replies for AI context: {e}")
-        except Exception as e_gen:
-            logger.error(f"Generic error fetching thread replies for AI context: {e_gen}", exc_info=True)
+    if thread_ts:
+        logger.info(f"Query is in thread {thread_ts}. History fetching is disabled.")
     else:
-        logger.info("Query is not in a thread (new message or DM). No additional conversation history from channel/DM will be passed to AI beyond user_message_text.")
-        # For DMs not in a thread, or new channel messages, history is just the current message unless extended later.
+        logger.info("Query is not in a thread. No history will be passed to AI.")
 
     logger.debug(f"User's direct message for AI: {user_message_text}")
     logger.debug(f"Formatted conversation history for AI: {formatted_conversation_history[:200]}...")
@@ -91,6 +66,7 @@ def process_user_query(
             formatted_conversation_history=formatted_conversation_history
             # We might need to pass more context to the AI service if it needs to behave differently for DMs vs. Mentions
         )
+        logger.debug(f"DEBUG unified_query_handler: Full ai_components received: {ai_components}")
     except Exception as e:
         logger.error(f"Error calling process_mention_and_generate_all_components: {e}", exc_info=True)
         try:

@@ -1314,7 +1314,6 @@ def create_ticket_from_thread_from_shortcut_continue_create_ticket(ack, body, cl
 @app.action("create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action")
 def create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action(ack, body, client, logger, context):
     ack()  # Acknowledge the button press immediately
-
     trigger_id = body["trigger_id"]
     user_id_who_clicked = body["user"]["id"]
     action_details_str = body["actions"][0]["value"]
@@ -1323,7 +1322,7 @@ def create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action(ack, body
 
     try:
         action_details = json.loads(action_details_str)
-        title = action_details.get("title")
+        title_from_action = action_details.get("title") # Renamed to avoid clash if needed later
         description = action_details.get("description")
         original_channel_id = action_details.get("channel_id")
         original_thread_ts = action_details.get("thread_ts")
@@ -1331,17 +1330,21 @@ def create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action(ack, body
         ai_priority = action_details.get("priority") # NEW: Get priority from button value
         ai_issue_type = action_details.get("issue_type") # NEW: Get issue_type from button value
 
-        if not title or not description:
-            logger.error("Missing title or description in action_details for 'Looks Good, Create Ticket' button.")
+        # Ensure description is present
+        if not description:
+            logger.error("Missing description in action_details for 'Looks Good, Create Ticket' button.")
             if original_channel_id and original_thread_ts: # Try to post ephemeral if context is available
                 client.chat_postEphemeral(
                     channel=original_channel_id,
                     user=user_id_who_clicked,
                     thread_ts=original_thread_ts,
-                    text="Sorry, I couldn't retrieve the generated title or description to pre-fill the form. Please try again."
+                    text="Sorry, I couldn't retrieve the generated description to pre-fill the form. Please try again."
                 )
             return
 
+        # Ensure title is at least an empty string if None, to align with build_create_ticket_modal default
+        title_for_modal = title_from_action if title_from_action is not None else ""
+        
         # Prepare private_metadata for the Jira creation modal
         # This will be used by handle_modal_submission to know where to post confirmation
         # and to get the thread_summary for the 'View Similar Tickets' button.
@@ -1364,7 +1367,7 @@ def create_ticket_from_Bot_from_Looks_Good_Create_Ticket_Button_Action(ack, body
         # logger.info(f"Stored modal context for 'bot_looks_good_create' in conversation_states with key: {private_metadata_str}")
 
         modal_view = build_create_ticket_modal(
-            initial_summary=title,
+            initial_summary=title_for_modal, # Use the processed title
             initial_description=description,
             initial_priority=ai_priority, # NEW: Pass to modal builder
             initial_issue_type=ai_issue_type, # NEW: Pass to modal builder
